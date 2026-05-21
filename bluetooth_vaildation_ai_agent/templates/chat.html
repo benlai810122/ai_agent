@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent Chat</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-8 col-lg-6">
+            <div class="card shadow">
+                <div class="card-header bg-primary text-white text-center">
+                    <h3>AI Agent Chat</h3>
+                </div>
+                <div class="card-body chat-body" id="chat-body">
+                    <!-- Chat messages will appear here -->
+                </div>
+                <div class="card-footer">
+                    <div id="agent-status" class="agent-status d-none" aria-live="polite">
+                        <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                        <span>Agent is running tools and preparing a response. This may take a while.</span>
+                    </div>
+                    <form id="chat-form" class="d-flex gap-2">
+                        <input type="text" id="user-input" class="form-control" placeholder="Type your message..." autocomplete="off" required>
+                        <button class="btn btn-primary" id="send-button" type="submit">Send</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script>
+$(function() {
+    function escapeHtml(text) {
+        return text
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+    }
+
+    function renderMessageContent(sender, text) {
+        if (sender === 'You') {
+            return `<p>${escapeHtml(text)}</p>`;
+        }
+
+        const markdownHtml = marked.parse(text || '', {
+            breaks: true,
+            gfm: true,
+        });
+        return DOMPurify.sanitize(markdownHtml);
+    }
+
+    function appendMessage(sender, text) {
+        const isUser = sender === 'You';
+        const align = isUser ? 'justify-content-end' : 'justify-content-start';
+        const bubbleClass = isUser ? 'user-bubble' : 'agent-bubble';
+        const contentHtml = renderMessageContent(sender, text);
+        $('#chat-body').append(
+            `<div class="message-row d-flex ${align}">
+                <div class="message-bubble ${bubbleClass}">
+                    <div class="message-sender">${sender}</div>
+                    <div class="message-content">${contentHtml}</div>
+                </div>
+            </div>`
+        );
+        $('#chat-body').scrollTop($('#chat-body')[0].scrollHeight);
+    }
+
+    function setPendingState(isPending) {
+        $('#user-input').prop('disabled', isPending);
+        $('#send-button').prop('disabled', isPending);
+        $('#agent-status').toggleClass('d-none', !isPending);
+        if (!isPending) {
+            $('#user-input').focus();
+        }
+    }
+
+    function addWorkingIndicator() {
+        const indicatorId = `working-${Date.now()}`;
+        $('#chat-body').append(
+            `<div class="message-row d-flex justify-content-start" id="${indicatorId}">
+                <div class="message-bubble agent-bubble working-bubble">
+                    <div class="message-sender">Agent</div>
+                    <div class="message-content working-content">
+                        Working<span class="dot-anim"><span>.</span><span>.</span><span>.</span></span>
+                    </div>
+                </div>
+            </div>`
+        );
+        $('#chat-body').scrollTop($('#chat-body')[0].scrollHeight);
+        return indicatorId;
+    }
+
+    function removeWorkingIndicator(indicatorId) {
+        $(`#${indicatorId}`).remove();
+    }
+
+    $('#chat-form').on('submit', function(e) {
+        e.preventDefault();
+        const userInput = $('#user-input').val().trim();
+        if (!userInput) {
+            return;
+        }
+
+        appendMessage('You', userInput);
+        $('#user-input').val('');
+        setPendingState(true);
+        const indicatorId = addWorkingIndicator();
+
+        $.ajax({
+            url: '/chat',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({message: userInput}),
+            success: function(data) {
+                removeWorkingIndicator(indicatorId);
+                appendMessage('Agent', data.reply);
+            },
+            error: function() {
+                removeWorkingIndicator(indicatorId);
+                appendMessage('Agent', 'Error: Could not reach server.');
+            },
+            complete: function() {
+                setPendingState(false);
+            }
+        });
+    });
+});
+</script>
+</body>
+</html>

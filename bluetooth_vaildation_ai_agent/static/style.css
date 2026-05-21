@@ -1,0 +1,141 @@
+body {
+    background: linear-gradient(135deg, #f0f4ff 0%, #f8fafc 55%, #ecfeff 100%);
+}
+
+.chat-body {
+    min-height: 300px;
+    max-height: 480px;
+    overflow-y: auto;
+    background: #fff;
+    border-radius: 0.75rem;
+    margin-bottom: 1rem;
+    padding: 0.5rem;
+}
+
+.agent-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    margin-bottom: 0.65rem;
+    color: #0f172a;
+    background: #e0f2fe;
+    border: 1px solid #bae6fd;
+    border-radius: 0.55rem;
+    padding: 0.45rem 0.6rem;
+}
+
+.message-row {
+    margin: 0.6rem 0;
+}
+
+.message-bubble {
+    max-width: 88%;
+    padding: 0.75rem 0.9rem;
+    border-radius: 0.9rem;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+}
+
+.user-bubble {
+    background: #e2e8f0;
+    color: #0f172a;
+}
+
+.agent-bubble {
+    background: #0f172a;
+    color: #f8fafc;
+}
+
+.working-bubble {
+    opacity: 0.96;
+}
+
+.working-content {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+}
+
+.dot-anim span {
+    animation: dotPulse 1.2s infinite;
+    display: inline-block;
+    width: 0.45ch;
+}
+
+.dot-anim span:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.dot-anim span:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes dotPulse {
+    0%, 20% {
+        opacity: 0.2;
+        transform: translateY(0);
+    }
+    50% {
+        opacity: 1;
+        transform: translateY(-1px);
+    }
+    100% {
+        opacity: 0.2;
+        transform: translateY(0);
+    }
+}
+
+.message-sender {
+    font-size: 0.78rem;
+    font-weight: 700;
+    opacity: 0.85;
+    margin-bottom: 0.35rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.message-content {
+    line-height: 1.5;
+    word-wrap: break-word;
+}
+
+.message-content p,
+.message-content ul,
+.message-content ol,
+.message-content pre,
+.message-content blockquote {
+    margin-bottom: 0.65rem;
+}
+
+.message-content p:last-child,
+.message-content ul:last-child,
+.message-content ol:last-child,
+.message-content pre:last-child,
+.message-content blockquote:last-child {
+    margin-bottom: 0;
+}
+
+.message-content code {
+    background: rgba(148, 163, 184, 0.28);
+    border-radius: 0.35rem;
+    padding: 0.12rem 0.35rem;
+    font-size: 0.92em;
+}
+
+.message-content pre {
+    background: rgba(15, 23, 42, 0.7);
+    border-radius: 0.55rem;
+    padding: 0.7rem;
+    overflow-x: auto;
+}
+
+.message-content pre code {
+    background: transparent;
+    padding: 0;
+}
+
+.message-content blockquote {
+    border-left: 3px solid rgba(148, 163, 184, 0.7);
+    padding-left: 0.7rem;
+    opacity: 0.95;
+}
