@@ -3,6 +3,8 @@ import os
 import json
 import base64
 import threading
+import re
+from typing import Callable
 from datetime import datetime
 import httpx
 from regular_ai_agent_tools import ANTHROPIC_TOOLS, TOOL_FUNCTIONS, set_scheduler_notifier, list_scheduled_tasks
@@ -32,6 +34,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEDULED_MESSAGES = []
 SCHEDULED_MESSAGES_LOCK = threading.Lock()
 LAST_AUTO_SUMMARY_EXECUTED_COUNT = 0
+PENDING_TEST_CONFIRMATIONS = {}
 
 SYSTEM_INSTRUCTION = (
     "You are a helpful AI assistant running on the user's laptop. "
@@ -50,11 +53,233 @@ SYSTEM_INSTRUCTION = (
     f"Your program is located at: {SCRIPT_DIR}"
 )
 
+TEST_PRECHECK_SYSTEM_INSTRUCTION = (
+    "You are preparing a test execution precheck. "
+    "Do NOT call any tools in this step. "
+    "Analyze what parts of the user's requested test can be done with currently available tools, and what parts cannot be done. "
+    "Return a concise plan using this structure: "
+    "1) Planned Test Steps (numbered), "
+    "2) Unsupported Parts, "
+    "3) Capability Match (percentage), "
+    "4) Ask for confirmation to start now (yes/no). "
+    "If a user asks for actions like reboot/shutdown and no direct tool exists, clearly mark those actions as unsupported. "
+    "The capability percentage should roughly reflect supported requested actions divided by total requested actions."
+)
+
+
+def _is_test_request(user_text: str) -> bool:
+    text = user_text.lower()
+    test_keywords = [
+        "test", "validate", "verification", "verify", "reconnect", "disconnect", "connect",
+        "bluetooth", "headset", "audio", "mic", "microphone", "speaker", "schedule",
+    ]
+    return any(k in text for k in test_keywords)
+
+
+def _parse_confirmation(user_text: str) -> tuple[str, str]:
+    """Parse a user reply into (decision, extra_instruction).
+
+    decision: 'yes' | 'no' | 'pending'
+    extra_instruction: any additional context the user added after the intent word,
+                       e.g. "yes, but please also check the mic" -> extra="check the mic"
+    """
+    text = user_text.strip()
+
+    yes_pattern = re.compile(
+        r"^\s*(yes|yeah|yep|yup|sure|ok|okay|go ahead|go|start|proceed|continue|do it|let'?s go|please start)"
+        r"(?:[,!.]?\s+(.*))?$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    no_pattern = re.compile(
+        r"^\s*(no|nope|nah|cancel|stop|don'?t|do not|abort|skip it)"
+        r"(?:[,!.]?\s+(.*))?$",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    m = yes_pattern.match(text)
+    if m:
+        extra = (m.group(2) or "").strip()
+        extra = re.sub(r"^(but|please|just|also|and|however|though)\s+", "", extra, flags=re.IGNORECASE).strip()
+        return "yes", extra
+
+    m = no_pattern.match(text)
+    if m:
+        extra = (m.group(2) or "").strip()
+        extra = re.sub(r"^(but|please|just|also|and|however|though)\s+", "", extra, flags=re.IGNORECASE).strip()
+        return "no", extra
+
+    return "pending", ""
+
+
+def _extract_capability_percent(reply_text: str) -> int | None:
+    """Extract capability percentage from precheck text, if present."""
+    if not reply_text:
+        return None
+    match = re.search(r"capability\s*match[^\d]*(\d{1,3})\s*%", reply_text, flags=re.IGNORECASE)
+    if not match:
+        # Fallback: find any percentage value in the reply.
+        match = re.search(r"(\d{1,3})\s*%", reply_text)
+    if not match:
+        return None
+    value = int(match.group(1))
+    return max(0, min(100, value))
+
+
+def _print_step_start(step_index: int, fn_name: str, fn_args: dict, step_callback: Callable[[str], None] | None = None) -> None:
+    """Print a clear step-start marker before each test/tool action."""
+    step_text = f"[TEST STEP START] Step {step_index}: {fn_name} | args={json.dumps(fn_args, default=str)}"
+    print(step_text, flush=True)
+    if step_callback:
+        try:
+            step_callback(step_text)
+        except Exception:
+            pass
+
 # ── Agent loop ──────────────────────────────────────────────────
 
 
-def _run_agent_turn(messages: list, user_text: str, print_tool_logs: bool = True) -> str:
+def _run_agent_turn(
+    messages: list,
+    user_text: str,
+    print_tool_logs: bool = True,
+    require_test_confirmation: bool = True,
+    step_callback: Callable[[str], None] | None = None,
+) -> str:
     """Run one agent turn with tool handling and return final text reply."""
+    session_key = id(messages)
+    pending_request = PENDING_TEST_CONFIRMATIONS.get(session_key)
+    confirmed_execution = False
+
+    if pending_request:
+        decision, extra_instruction = _parse_confirmation(user_text)
+
+        if decision == "yes":
+            confirmed_execution = True
+            extra_clause = f" Additionally: {extra_instruction}." if extra_instruction else ""
+            user_text = (
+                f"User confirmed to proceed. Execute this test plan now: {pending_request}.{extra_clause} "
+                "Use tools as needed and report each major step result."
+            )
+            PENDING_TEST_CONFIRMATIONS.pop(session_key, None)
+
+        elif decision == "no":
+            PENDING_TEST_CONFIRMATIONS.pop(session_key, None)
+            if extra_instruction:
+                # User cancelled but left a follow-up request — handle it as a fresh turn.
+                cancel_note = "Test execution cancelled."
+                messages.append({"role": "user", "content": user_text})
+                messages.append({"role": "assistant", "content": cancel_note})
+                return _run_agent_turn(
+                    messages,
+                    extra_instruction,
+                    print_tool_logs=print_tool_logs,
+                    require_test_confirmation=require_test_confirmation,
+                    step_callback=step_callback,
+                )
+            cancel_reply = "Test execution cancelled. Let me know if you'd like to try something else."
+            messages.append({"role": "user", "content": user_text})
+            messages.append({"role": "assistant", "content": cancel_reply})
+            return cancel_reply
+
+        else:
+            reminder_reply = (
+                "A test plan is waiting for your go-ahead. "
+                "Reply with **yes** (optionally with extra instructions, e.g. \"yes, but also check the mic\") "
+                "or **no** (optionally with a new request, e.g. \"no, please just check Bluetooth status\")."
+            )
+            messages.append({"role": "user", "content": user_text})
+            messages.append({"role": "assistant", "content": reminder_reply})
+            return reminder_reply
+
+    if require_test_confirmation and _is_test_request(user_text) and not confirmed_execution:
+        messages.append({"role": "user", "content": user_text})
+        precheck_response = client.messages.create(
+            model=MODEL,
+            max_tokens=1200,
+            system=f"{SYSTEM_INSTRUCTION} {TEST_PRECHECK_SYSTEM_INSTRUCTION}",
+            messages=messages,
+        )
+        precheck_reply = "".join(block.text for block in precheck_response.content if block.type == "text")
+        messages.append({"role": "assistant", "content": precheck_response.content})
+        capability_percent = _extract_capability_percent(precheck_reply)
+
+        # If coverage is 100%, start immediately after showing the schedule.
+        if capability_percent == 100:
+            execute_text = (
+                f"Precheck complete with 100% capability match. Start now: {user_text}. "
+                "Execute the planned test steps immediately and report each major step result."
+            )
+            messages.append({"role": "user", "content": execute_text})
+
+            response = client.messages.create(
+                model=MODEL,
+                max_tokens=4096,
+                system=SYSTEM_INSTRUCTION,
+                messages=messages,
+                tools=ㄋ,
+            )
+
+            tool_step_index = 0
+            while any(block.type == "tool_use" for block in response.content):
+                assistant_content = response.content
+                messages.append({"role": "assistant", "content": assistant_content})
+
+                tool_results = []
+                for block in assistant_content:
+                    if block.type != "tool_use":
+                        continue
+
+                    fn_name = block.name
+                    fn_args = block.input if block.input else {}
+                    tool_step_index += 1
+                    _print_step_start(tool_step_index, fn_name, fn_args, step_callback=step_callback)
+                    if print_tool_logs:
+                        print(f"  [Tool: {fn_name}({fn_args})]")
+
+                    fn = ALL_TOOL_FUNCTIONS.get(fn_name)
+                    if fn:
+                        try:
+                            result = fn(**fn_args)
+                        except TypeError as e:
+                            result = {"error": f"Invalid arguments for {fn_name}: {e}"}
+                    else:
+                        result = {"error": f"Unknown function: {fn_name}"}
+
+                    if fn_name == "capture_screen" and isinstance(result, dict) and result.get("status") == "success":
+                        with open(result["file_path"], "rb") as img_file:
+                            img_b64 = base64.b64encode(img_file.read()).decode("utf-8")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": [
+                                {"type": "text", "text": json.dumps(result, default=str)},
+                                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
+                            ],
+                        })
+                    else:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result, default=str),
+                        })
+
+                messages.append({"role": "user", "content": tool_results})
+
+                response = client.messages.create(
+                    model=MODEL,
+                    max_tokens=4096,
+                    system=SYSTEM_INSTRUCTION,
+                    messages=messages,
+                    tools=ALL_TOOLS,
+                )
+
+            exec_reply = "".join(block.text for block in response.content if block.type == "text")
+            messages.append({"role": "assistant", "content": response.content})
+            return f"{precheck_reply}\n\n{exec_reply}"
+
+        PENDING_TEST_CONFIRMATIONS[session_key] = user_text
+        return precheck_reply
+
     messages.append({"role": "user", "content": user_text})
 
     response = client.messages.create(
@@ -66,6 +291,7 @@ def _run_agent_turn(messages: list, user_text: str, print_tool_logs: bool = True
     )
 
     # Handle tool calls in a loop
+    tool_step_index = 0
     while any(block.type == "tool_use" for block in response.content):
         assistant_content = response.content
         messages.append({"role": "assistant", "content": assistant_content})
@@ -77,6 +303,8 @@ def _run_agent_turn(messages: list, user_text: str, print_tool_logs: bool = True
 
             fn_name = block.name
             fn_args = block.input if block.input else {}
+            tool_step_index += 1
+            _print_step_start(tool_step_index, fn_name, fn_args, step_callback=step_callback)
             if print_tool_logs:
                 print(f"  [Tool: {fn_name}({fn_args})]")
 
@@ -145,7 +373,7 @@ def _on_scheduled_task(task: dict) -> None:
 
         # Scheduled tasks run in background timers, so protect shared context updates.
         with SCHEDULED_MESSAGES_LOCK:
-            reply = _run_agent_turn(SCHEDULED_MESSAGES, scheduled_prompt, print_tool_logs=True)
+            reply = _run_agent_turn(SCHEDULED_MESSAGES, scheduled_prompt, print_tool_logs=True, require_test_confirmation=False)
         print(f"\nAgent: {reply}\n", flush=True)
 
         # Auto-summary: when all scheduled tasks are done, generate a final consolidated report
@@ -172,7 +400,7 @@ def _on_scheduled_task(task: dict) -> None:
                     "Save the report under the report folder using the required report naming/content format."
                 )
                 with SCHEDULED_MESSAGES_LOCK:
-                    summary_reply = _run_agent_turn(SCHEDULED_MESSAGES, auto_summary_prompt, print_tool_logs=True)
+                    summary_reply = _run_agent_turn(SCHEDULED_MESSAGES, auto_summary_prompt, print_tool_logs=True, require_test_confirmation=False)
                 LAST_AUTO_SUMMARY_EXECUTED_COUNT = executed_count
                 print(f"\nAgent: {summary_reply}\n", flush=True)
     except Exception as e:

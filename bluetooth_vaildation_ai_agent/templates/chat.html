@@ -3,22 +3,58 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Agent Chat</title>
+    <title>Intel Validation AI Agent</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div class="container py-5">
+<canvas id="hex-canvas"></canvas>
+<div class="scan-line" id="scan-line"></div>
+
+<div class="hero-header">
+    <div class="hero-logo-ring">
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <polygon points="32,4 58,18 58,46 32,60 6,46 6,18" stroke="#0071c5" stroke-width="2" fill="none" opacity="0.9"/>
+            <polygon points="32,12 50,22 50,42 32,52 14,42 14,22" stroke="#00c7fd" stroke-width="1" fill="rgba(0,113,197,0.08)"/>
+            <text x="32" y="37" text-anchor="middle" font-size="18" font-weight="bold" fill="#00c7fd" font-family="monospace">AI</text>
+        </svg>
+    </div>
+    <div class="hero-text">
+        <h1 class="hero-title">Intel Validation AI Agent</h1>
+        <p class="hero-subtitle">Autonomous Hardware Validation Platform &nbsp;&bull;&nbsp; Powered by Claude</p>
+    </div>
+    <div class="hero-indicators">
+        <span class="hero-dot" id="hero-dot"></span>
+        <span class="hero-dot-label" id="hero-dot-label">IDLE</span>
+    </div>
+</div>
+
+<div class="container pb-5">
     <div class="row justify-content-center">
-        <div class="col-md-8 col-lg-6">
-            <div class="card shadow">
-                <div class="card-header bg-primary text-white text-center">
-                    <h3>AI Agent Chat</h3>
+        <div class="col-md-10 col-lg-9">
+            <div class="card hud-card shadow">
+                <div class="card-header hud-header text-center">
+                    <span class="hud-header-label">Chat Console</span>
                 </div>
                 <div class="card-body chat-body" id="chat-body">
                     <!-- Chat messages will appear here -->
                 </div>
                 <div class="card-footer">
+                    <div class="timeline-wrapper mb-3">
+                        <button class="btn btn-outline-primary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#timeline-collapse" aria-expanded="false" aria-controls="timeline-collapse">
+                            Toggle Test Timeline
+                        </button>
+                        <div class="collapse mt-2" id="timeline-collapse">
+                            <div class="timeline-panel">
+                                <div class="timeline-header">
+                                    <div class="timeline-title">Recent Test Runs</div>
+                                    <button type="button" class="btn btn-sm btn-light" id="timeline-refresh">Refresh</button>
+                                </div>
+                                <div id="timeline-empty" class="timeline-empty d-none">No test runs yet.</div>
+                                <div id="timeline-list"></div>
+                            </div>
+                        </div>
+                    </div>
                     <div id="agent-status" class="agent-status d-none" aria-live="polite">
                         <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
                         <span>Agent is running tools and preparing a response. This may take a while.</span>
@@ -33,6 +69,7 @@
     </div>
 </div>
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 <script>
@@ -78,6 +115,10 @@ $(function() {
         $('#user-input').prop('disabled', isPending);
         $('#send-button').prop('disabled', isPending);
         $('#agent-status').toggleClass('d-none', !isPending);
+        $('body').toggleClass('agent-running', isPending);
+        $('#scan-line').toggleClass('active', isPending);
+        $('#hero-dot').toggleClass('dot-running', isPending);
+        $('#hero-dot-label').text(isPending ? 'RUNNING TEST' : 'IDLE');
         if (!isPending) {
             $('#user-input').focus();
         }
@@ -92,6 +133,10 @@ $(function() {
                     <div class="message-content working-content">
                         Working<span class="dot-anim"><span>.</span><span>.</span><span>.</span></span>
                     </div>
+                    <div class="working-progress-wrap d-none">
+                        <div class="working-progress-title">Test Progress</div>
+                        <ul class="working-progress-list mb-0"></ul>
+                    </div>
                 </div>
             </div>`
         );
@@ -101,6 +146,135 @@ $(function() {
 
     function removeWorkingIndicator(indicatorId) {
         $(`#${indicatorId}`).remove();
+    }
+
+    function appendProgressLine(indicatorId, text) {
+        const row = $(`#${indicatorId}`);
+        const wrap = row.find('.working-progress-wrap');
+        const list = row.find('.working-progress-list');
+        if (!wrap.length || !list.length) {
+            return;
+        }
+        wrap.removeClass('d-none');
+        list.append(`<li>${escapeHtml(text)}</li>`);
+        $('#chat-body').scrollTop($('#chat-body')[0].scrollHeight);
+    }
+
+    function normalizeProgressItem(item) {
+        if (typeof item === 'string') {
+            return { timestamp: '', text: item };
+        }
+        return {
+            timestamp: item.timestamp || '',
+            text: item.text || '',
+        };
+    }
+
+    function formatProgressLine(item) {
+        const prefix = item.timestamp ? `[${item.timestamp}] ` : '';
+        return `${prefix}${item.text}`;
+    }
+
+    function buildHistoryCard(run) {
+        const statusClass = run.status === 'done' ? 'status-done' : 'status-error';
+        const safePrompt = escapeHtml(run.user_text || '(no prompt)');
+        const progress = run.progress || [];
+        const stepsHtml = progress.length
+            ? progress.map(p => {
+                const item = normalizeProgressItem(p);
+                return `<li>${escapeHtml(formatProgressLine(item))}</li>`;
+            }).join('')
+            : '<li>No tool-step logs captured.</li>';
+
+        const finalSummary = run.status === 'done'
+            ? `<div class="timeline-final"><strong>Final Reply:</strong> ${escapeHtml((run.reply || '').slice(0, 300))}${(run.reply || '').length > 300 ? '...' : ''}</div>`
+            : `<div class="timeline-final"><strong>Error:</strong> ${escapeHtml(run.error || 'Unknown error')}</div>`;
+
+        return `
+            <details class="timeline-item">
+                <summary>
+                    <span class="timeline-status ${statusClass}">${escapeHtml(run.status || 'unknown')}</span>
+                    <span class="timeline-meta">${escapeHtml(run.started_at || '')}</span>
+                    <span class="timeline-prompt">${safePrompt}</span>
+                </summary>
+                <div class="timeline-body">
+                    <div class="timeline-range">${escapeHtml(run.started_at || '')} -> ${escapeHtml(run.ended_at || '')}</div>
+                    <ul class="timeline-steps mb-2">${stepsHtml}</ul>
+                    ${finalSummary}
+                </div>
+            </details>
+        `;
+    }
+
+    function renderHistory(history) {
+        const list = $('#timeline-list');
+        list.empty();
+        if (!history || history.length === 0) {
+            $('#timeline-empty').removeClass('d-none');
+            return;
+        }
+
+        $('#timeline-empty').addClass('d-none');
+        history.forEach(run => {
+            list.append(buildHistoryCard(run));
+        });
+    }
+
+    function loadHistory() {
+        $.ajax({
+            url: '/chat_history',
+            method: 'GET',
+            success: function(data) {
+                renderHistory(data.history || []);
+            },
+            error: function() {
+                renderHistory([]);
+            }
+        });
+    }
+
+    function pollChatStatus(requestId, indicatorId) {
+        let shownProgress = 0;
+
+        const tick = function() {
+            $.ajax({
+                url: `/chat_status/${requestId}`,
+                method: 'GET',
+                success: function(data) {
+                    const progress = data.progress || [];
+                    for (let i = shownProgress; i < progress.length; i++) {
+                        const item = normalizeProgressItem(progress[i]);
+                        appendProgressLine(indicatorId, formatProgressLine(item));
+                    }
+                    shownProgress = progress.length;
+
+                    if (data.status === 'done') {
+                        removeWorkingIndicator(indicatorId);
+                        appendMessage('Agent', data.reply || 'Done.');
+                        setPendingState(false);
+                        loadHistory();
+                        return;
+                    }
+
+                    if (data.status === 'error') {
+                        removeWorkingIndicator(indicatorId);
+                        appendMessage('Agent', `Error: ${data.error || 'Unknown server error.'}`);
+                        setPendingState(false);
+                        loadHistory();
+                        return;
+                    }
+
+                    setTimeout(tick, 700);
+                },
+                error: function() {
+                    removeWorkingIndicator(indicatorId);
+                    appendMessage('Agent', 'Error: Could not read live test progress from server.');
+                    setPendingState(false);
+                }
+            });
+        };
+
+        tick();
     }
 
     $('#chat-form').on('submit', function(e) {
@@ -121,19 +295,109 @@ $(function() {
             contentType: 'application/json',
             data: JSON.stringify({message: userInput}),
             success: function(data) {
-                removeWorkingIndicator(indicatorId);
-                appendMessage('Agent', data.reply);
+                if (!data.request_id) {
+                    removeWorkingIndicator(indicatorId);
+                    appendMessage('Agent', 'Error: Missing request id from server.');
+                    setPendingState(false);
+                    return;
+                }
+                pollChatStatus(data.request_id, indicatorId);
             },
             error: function() {
                 removeWorkingIndicator(indicatorId);
                 appendMessage('Agent', 'Error: Could not reach server.');
-            },
-            complete: function() {
                 setPendingState(false);
             }
         });
     });
+
+    $('#timeline-refresh').on('click', function() {
+        loadHistory();
+    });
+
+    loadHistory();
 });
+</script>
+
+<script>
+/* ── Animated hex-grid background ── */
+(function() {
+    const canvas = document.getElementById('hex-canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H, nodes, animFrame;
+
+    function resize() {
+        W = canvas.width  = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+        buildNodes();
+    }
+
+    function buildNodes() {
+        nodes = [];
+        const spacing = 90;
+        for (let x = 0; x < W + spacing; x += spacing) {
+            for (let y = 0; y < H + spacing; y += spacing * 0.866) {
+                const offset = (Math.floor(y / (spacing * 0.866)) % 2) * (spacing / 2);
+                nodes.push({
+                    x: x + offset,
+                    y,
+                    pulse: Math.random() * Math.PI * 2,
+                    speed: 0.006 + Math.random() * 0.01,
+                    active: Math.random() > 0.72,
+                });
+            }
+        }
+    }
+
+    function drawHex(x, y, r, alpha) {
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+            const a = (Math.PI / 3) * i - Math.PI / 6;
+            const px = x + r * Math.cos(a);
+            const py = y + r * Math.sin(a);
+            i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = `rgba(0, 113, 197, ${alpha})`;
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+    }
+
+    function isRunning() {
+        return document.body.classList.contains('agent-running');
+    }
+
+    function draw(ts) {
+        ctx.clearRect(0, 0, W, H);
+        const running = isRunning();
+        const boost = running ? 2.4 : 1;
+
+        nodes.forEach(n => {
+            n.pulse += n.speed * boost;
+            const glow = (Math.sin(n.pulse) + 1) / 2;
+            if (n.active) {
+                const r = running ? 32 : 28;
+                drawHex(n.x, n.y, r, 0.06 + glow * (running ? 0.32 : 0.14));
+                if (glow > 0.78) {
+                    ctx.beginPath();
+                    ctx.arc(n.x, n.y, 2.5, 0, Math.PI * 2);
+                    ctx.fillStyle = running
+                        ? `rgba(0, 199, 253, ${glow * 0.9})`
+                        : `rgba(0, 113, 197, ${glow * 0.55})`;
+                    ctx.fill();
+                }
+            } else {
+                drawHex(n.x, n.y, 28, 0.03 + glow * 0.04);
+            }
+        });
+
+        animFrame = requestAnimationFrame(draw);
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+    draw(0);
+})();
 </script>
 </body>
 </html>

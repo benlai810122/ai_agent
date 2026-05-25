@@ -179,6 +179,22 @@ def modify_file(file_path: str, old_text: str, new_text: str) -> dict:
         return {"error": str(e)}
 
 
+def create_report_folder() -> dict:
+    """Create the report folder if it does not exist."""
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        report_dir = os.path.join(base_dir, "report")
+        already_exists = os.path.isdir(report_dir)
+        os.makedirs(report_dir, exist_ok=True)
+        return {
+            "status": "success",
+            "folder_path": os.path.abspath(report_dir),
+            "created": not already_exists,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def capture_screen(save_path: str = "") -> dict:
     """Capture a screenshot of the laptop's screen for analysis. Returns the file path and resolution."""
     try:
@@ -378,13 +394,14 @@ TOOL_FUNCTIONS = {
     "delete_file": delete_file,
     "write_file": write_file,
     "modify_file": modify_file,
+    "create_report_folder": create_report_folder,
     "capture_screen": capture_screen,
     "schedule_task_in_minutes": schedule_task_in_minutes,
     "list_scheduled_tasks": list_scheduled_tasks,
     "cancel_scheduled_task": cancel_scheduled_task,
 }
 
-TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, capture_screen, schedule_task_in_minutes, list_scheduled_tasks, cancel_scheduled_task]
+TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, schedule_task_in_minutes, list_scheduled_tasks, cancel_scheduled_task]
 
 # Anthropic-compatible tool definitions
 ANTHROPIC_TOOLS = [
@@ -483,6 +500,11 @@ ANTHROPIC_TOOLS = [
             },
             "required": ["file_path", "old_text", "new_text"],
         },
+    },
+    {
+        "name": "create_report_folder",
+        "description": "Create the report folder if it does not exist.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "capture_screen",
@@ -651,6 +673,14 @@ OPENAI_TOOLS = [
                 },
                 "required": ["file_path", "old_text", "new_text"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_report_folder",
+            "description": "Create the report folder if it does not exist.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
     {
