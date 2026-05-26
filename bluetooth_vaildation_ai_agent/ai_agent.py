@@ -39,7 +39,10 @@ PENDING_TEST_CONFIRMATIONS = {}
 SYSTEM_INSTRUCTION = (
     "You are a helpful AI assistant running on the user's laptop. "
     "You have access to tools that let you interact with the local system. "
-    "Use the available tools whenever the user asks about system info, time, files, etc. "
+    "Use the available tools whenever the user asks about system info, time, files, opening websites, opening local files, closing local media/apps, etc. "
+    "For any headset or audio validation test, make sure system audio is not muted before and during playback checks. "
+    "When the user asks to play music or audio, use open_local_file to open the file from the 'music' subfolder inside the project root. "
+    "If no specific track is named, first call list_directory on the 'music' folder to discover available files, then open the first suitable one. "
     "When calling tools, always provide ALL required parameters. "
     "When creating files with content, use create_file with the content parameter, or use write_file with both file_path and content. "
     "When asked to create or save any test report, always save it under the 'report' folder. "
@@ -183,9 +186,9 @@ def _run_agent_turn(
 
         else:
             reminder_reply = (
-                "A test plan is waiting for your go-ahead. "
-                "Reply with **yes** (optionally with extra instructions, e.g. \"yes, but also check the mic\") "
-                "or **no** (optionally with a new request, e.g. \"no, please just check Bluetooth status\")."
+                "A test plan is waiting for your confirmation. "
+                "Please reply **yes** to start the test (you can also add extra instructions, e.g. \"yes, but also check the mic\") "
+                "or **no** to cancel (you can also add a new request, e.g. \"no, please just check Bluetooth status\")."
             )
             messages.append({"role": "user", "content": user_text})
             messages.append({"role": "assistant", "content": reminder_reply})
@@ -216,7 +219,7 @@ def _run_agent_turn(
                 max_tokens=4096,
                 system=SYSTEM_INSTRUCTION,
                 messages=messages,
-                tools=ㄋ,
+                tools=ALL_TOOLS,
             )
 
             tool_step_index = 0
@@ -278,7 +281,11 @@ def _run_agent_turn(
             return f"{precheck_reply}\n\n{exec_reply}"
 
         PENDING_TEST_CONFIRMATIONS[session_key] = user_text
-        return precheck_reply
+        confirmation_prompt = (
+            "\n\n---\n"
+            "**Ready to start?** Please reply **yes** to begin or **no** to cancel."
+        )
+        return precheck_reply + confirmation_prompt
 
     messages.append({"role": "user", "content": user_text})
 

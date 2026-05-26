@@ -6,7 +6,12 @@ import os
 import json
 from datetime import datetime
 
+
+MAX_UPLOAD_CHARS = 50000
+
 app = Flask(__name__)
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 # Shared conversation state (per session in real app)
 messages = []
@@ -15,6 +20,14 @@ request_states = {}
 request_states_lock = threading.Lock()
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report", "web_ui_run_history.json")
 MAX_HISTORY_ITEMS = 100
+
+
+@app.after_request
+def add_no_cache_headers(response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 def _ensure_history_dir() -> None:
@@ -102,9 +115,49 @@ def index():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    user_text = request.json.get('message', '')
+    user_text = ""
+    display_user_text = ""
+
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        user_text = (payload.get('message') or '').strip()
+        display_user_text = user_text
+    else:
+        user_text = (request.form.get('message') or '').strip()
+        display_user_text = user_text
+
+        uploaded = request.files.get('txt_file')
+        if uploaded and uploaded.filename:
+            filename = uploaded.filename
+            if not filename.lower().endswith('.txt'):
+                return jsonify({'error': 'Only .txt files are supported for upload.'}), 400
+
+            try:
+                raw_bytes = uploaded.read()
+                file_text = raw_bytes.decode('utf-8', errors='replace')
+            except Exception as e:
+                return jsonify({'error': f'Could not read uploaded txt file: {e}'}), 400
+
+            if len(file_text) > MAX_UPLOAD_CHARS:
+                file_text = file_text[:MAX_UPLOAD_CHARS]
+
+            if not user_text:
+                user_text = f"Please analyze the uploaded txt file '{filename}'."
+
+            user_text = (
+                f"{user_text}\n\n"
+                f"Uploaded txt file name: {filename}\n"
+                f"Uploaded txt file content:\n"
+                f"```text\n{file_text}\n```"
+            )
+
+            if display_user_text:
+                display_user_text = f"{display_user_text} [Attached: {filename}]"
+            else:
+                display_user_text = f"[Attached txt: {filename}]"
+
     if not user_text:
-        return jsonify({'error': 'Please enter a message.'}), 400
+        return jsonify({'error': 'Please enter a message or upload a .txt file.'}), 400
 
     request_id = str(uuid.uuid4())
     with request_states_lock:
@@ -113,7 +166,7 @@ def chat():
             "progress": [],
             "reply": "",
             "error": "",
-            "user_text": user_text,
+            "user_text": display_user_text or user_text,
             "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "ended_at": "",
         }

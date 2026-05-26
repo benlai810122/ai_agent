@@ -1,0 +1,23 @@
+Two pairs of earbuds: Samsung Galaxy Buds3 Pro (FW: R630XXU0AZD2)
+A. Copy the Iperf.zip folder in Attachments to the DUT and to another device, which is used as a server.
+• Connect the DUT to AP over Wi-Fi. Connect the server to the same AP via ethernet cable.
+• On DUT, run TCP_RX.bat in command prompt admin. (make sure the IP address in the .bat file matches the server IP address)
+• On server, run "iperf3.exe -s -p5668" in the command prompt admin.
+TCP_RX,bat
+iperf3.exe -c <IP address of server PC> -i1 -R -t120 -w512M -l65507
+B. The audio glitch intermittently happens for a few seconds throughout the Teams call alongside mouse movement.
+C. When glitches occur, they can be heard on both pairs of earbuds.
+D. Glitch no longer occurs, and call audio is improved, when Wi-Fi traffic TCP_RX is stopped.
+
+MSFT clarify more details on test step.
+MSFT will test WIFI EB as next actions
+Repro steps
+1. Connect to WiFi 2.4GHz, any channel, BW 20MHz
+2. Pair BT Mouse, Keyboard, 2 sets of LE earbuds (Samsung Galaxy buds3 pro & Sony WF-1000XM5)
+3.
+Play YouTube music and start audio sharing on both sets of LE earbuds.
+We use "playing Youtube Music" to verify audio get streamed to both earbuds.
+Before Teams call initiation, we stopped Youtube.
+4. Initiate a Teams Call
+5. Start the iperf TCP-Rx in the background for wifi traffic
+6. Observe the Audio quality through the LE earbuds

@@ -1,7 +1,12 @@
 import os
 import subprocess
 import platform
+import webbrowser
+from urllib.parse import urlparse
 from datetime import datetime
+
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def get_current_time() -> dict:
@@ -217,6 +222,258 @@ def capture_screen(save_path: str = "") -> dict:
         return {"error": str(e)}
 
 
+def open_website(url: str) -> dict:
+    """Open a website in the default browser using a validated HTTP/HTTPS URL."""
+    try:
+        if not isinstance(url, str) or not url.strip():
+            return {"error": "url is required."}
+
+        normalized_url = url.strip()
+        if "://" not in normalized_url:
+            normalized_url = f"https://{normalized_url}"
+
+        parsed = urlparse(normalized_url)
+        if parsed.scheme not in ("http", "https"):
+            return {"error": "Only http and https URLs are allowed."}
+        if not parsed.netloc:
+            return {"error": "Invalid URL. Please provide a valid website address."}
+
+        opened = webbrowser.open(normalized_url, new=2)
+        return {
+            "status": "success",
+            "url": normalized_url,
+            "opened": bool(opened),
+            "message": "Website open request sent to default browser.",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def open_local_file(
+    file_path: str,
+    arguments: list[str] | None = None,
+    capture_output: bool = True,
+    timeout_seconds: int = 30,
+) -> dict:
+    """Open a local file under the project root folder.
+
+    For .exe/.bat/.cmd files, optional arguments can be passed and process
+    feedback (stdout/stderr/return code) can be captured.
+    """
+    try:
+        if not isinstance(file_path, str) or not file_path.strip():
+            return {"error": "file_path is required."}
+
+        if arguments is None:
+            arguments = []
+        if not isinstance(arguments, list) or not all(isinstance(a, str) for a in arguments):
+            return {"error": "arguments must be a list of strings."}
+
+        try:
+            timeout_seconds = int(timeout_seconds)
+        except Exception:
+            return {"error": "timeout_seconds must be an integer."}
+        if timeout_seconds < 1 or timeout_seconds > 300:
+            return {"error": "timeout_seconds must be between 1 and 300."}
+
+        capture_output = bool(capture_output)
+
+        requested_path = file_path.strip().strip('"').strip("'")
+        if os.path.isabs(requested_path):
+            candidate_path = os.path.abspath(requested_path)
+        else:
+            candidate_path = os.path.abspath(os.path.join(ROOT_DIR, requested_path))
+
+        # Restrict access to files under the project root.
+        if os.path.commonpath([candidate_path, ROOT_DIR]) != ROOT_DIR:
+            return {"error": "Only files under the project root folder are allowed."}
+
+        if not os.path.exists(candidate_path):
+            return {"error": f"File not found: {candidate_path}"}
+        if not os.path.isfile(candidate_path):
+            return {"error": f"Path is not a file: {candidate_path}"}
+
+        ext = os.path.splitext(candidate_path)[1].lower()
+        executable_exts = {".exe", ".bat", ".cmd"}
+
+        if ext in executable_exts:
+            if platform.system() == "Windows":
+                if ext in {".bat", ".cmd"}:
+                    command = ["cmd.exe", "/c", candidate_path, *arguments]
+                else:
+                    command = [candidate_path, *arguments]
+            else:
+                command = [candidate_path, *arguments]
+
+            if not capture_output:
+                proc = subprocess.Popen(command, cwd=ROOT_DIR)
+                launch_id = str(uuid.uuid4())[:8]
+                with _OPENED_LOCAL_LOCK:
+                    _OPENED_LOCAL_PROCESSES[launch_id] = {
+                        "launch_id": launch_id,
+                        "pid": proc.pid,
+                        "file_path": candidate_path,
+                        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+
+                return {
+                    "status": "success",
+                    "file_path": candidate_path,
+                    "launched_as_process": True,
+                    "arguments": arguments,
+                    "capture_output": False,
+                    "pid": proc.pid,
+                    "launch_id": launch_id,
+                    "message": "Process started in background. Use close_local_file_process with launch_id to stop it.",
+                }
+
+            result = subprocess.run(
+                command,
+                capture_output=capture_output,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=ROOT_DIR,
+            )
+
+            return {
+                "status": "success",
+                "file_path": candidate_path,
+                "launched_as_process": True,
+                "arguments": arguments,
+                "return_code": result.returncode,
+                "stdout": (result.stdout or "")[:4000] if capture_output else "",
+                "stderr": (result.stderr or "")[:2000] if capture_output else "",
+            }
+
+        if platform.system() == "Windows":
+            os.startfile(candidate_path)  # type: ignore[attr-defined]
+        elif platform.system() == "Darwin":
+            subprocess.Popen(["open", candidate_path])
+        else:
+            subprocess.Popen(["xdg-open", candidate_path])
+
+        return {
+            "status": "success",
+            "file_path": candidate_path,
+            "launched_as_process": False,
+            "message": "Open request sent to the OS default handler.",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "error": f"Process timed out after {timeout_seconds} seconds.",
+            "file_path": os.path.abspath(file_path),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def close_local_file_process(file_path: str = "", launch_id: str = "", force: bool = False) -> dict:
+    """Close/terminate local process for media/executable files under the project root.
+
+    Preferred: provide launch_id returned by open_local_file when capture_output is false.
+    Alternative: provide file_path and this tool will best-effort find matching processes.
+    """
+    try:
+        import psutil
+
+        if launch_id:
+            with _OPENED_LOCAL_LOCK:
+                launch = _OPENED_LOCAL_PROCESSES.get(launch_id)
+            if not launch:
+                return {"error": f"launch_id not found: {launch_id}"}
+
+            pid = launch.get("pid")
+            if not pid:
+                return {"error": f"No pid found for launch_id: {launch_id}"}
+
+            try:
+                proc = psutil.Process(pid)
+            except psutil.NoSuchProcess:
+                with _OPENED_LOCAL_LOCK:
+                    _OPENED_LOCAL_PROCESSES.pop(launch_id, None)
+                return {
+                    "status": "success",
+                    "launch_id": launch_id,
+                    "pid": pid,
+                    "already_stopped": True,
+                    "message": "Process already stopped.",
+                }
+
+            if force:
+                proc.kill()
+            else:
+                proc.terminate()
+            proc.wait(timeout=8)
+
+            with _OPENED_LOCAL_LOCK:
+                _OPENED_LOCAL_PROCESSES.pop(launch_id, None)
+
+            return {
+                "status": "success",
+                "launch_id": launch_id,
+                "pid": pid,
+                "message": "Tracked process terminated.",
+            }
+
+        if not file_path or not file_path.strip():
+            return {"error": "Provide either launch_id or file_path."}
+
+        requested_path = file_path.strip().strip('"').strip("'")
+        if os.path.isabs(requested_path):
+            candidate_path = os.path.abspath(requested_path)
+        else:
+            candidate_path = os.path.abspath(os.path.join(ROOT_DIR, requested_path))
+
+        if os.path.commonpath([candidate_path, ROOT_DIR]) != ROOT_DIR:
+            return {"error": "Only files under the project root folder are allowed."}
+        if not os.path.exists(candidate_path):
+            return {"error": f"File not found: {candidate_path}"}
+
+        target_lower = candidate_path.lower()
+        matched_pids = []
+
+        for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+            try:
+                exe = (proc.info.get("exe") or "").lower()
+                cmdline = " ".join(proc.info.get("cmdline") or []).lower()
+
+                is_match = target_lower == exe or target_lower in cmdline
+                if not is_match:
+                    try:
+                        open_files = proc.open_files() or []
+                    except (psutil.AccessDenied, psutil.NoSuchProcess):
+                        open_files = []
+                    for f in open_files:
+                        if (f.path or "").lower() == target_lower:
+                            is_match = True
+                            break
+
+                if is_match:
+                    if force:
+                        proc.kill()
+                    else:
+                        proc.terminate()
+                    matched_pids.append(proc.pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        if not matched_pids:
+            return {
+                "status": "not_found",
+                "file_path": candidate_path,
+                "message": "No running process matched this file.",
+            }
+
+        return {
+            "status": "success",
+            "file_path": candidate_path,
+            "terminated_pids": matched_pids,
+            "count": len(matched_pids),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Task scheduling ────────────────────────────────────────────
 import threading
 import uuid
@@ -225,6 +482,8 @@ import uuid
 _SCHEDULED_TASKS = {}
 _TASK_LOCK = threading.Lock()
 _SCHEDULER_NOTIFIER = None
+_OPENED_LOCAL_PROCESSES = {}
+_OPENED_LOCAL_LOCK = threading.Lock()
 
 
 def set_scheduler_notifier(callback) -> dict:
@@ -396,12 +655,15 @@ TOOL_FUNCTIONS = {
     "modify_file": modify_file,
     "create_report_folder": create_report_folder,
     "capture_screen": capture_screen,
+    "open_website": open_website,
+    "open_local_file": open_local_file,
+    "close_local_file_process": close_local_file_process,
     "schedule_task_in_minutes": schedule_task_in_minutes,
     "list_scheduled_tasks": list_scheduled_tasks,
     "cancel_scheduled_task": cancel_scheduled_task,
 }
 
-TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, schedule_task_in_minutes, list_scheduled_tasks, cancel_scheduled_task]
+TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, open_website, open_local_file, close_local_file_process, schedule_task_in_minutes, list_scheduled_tasks, cancel_scheduled_task]
 
 # Anthropic-compatible tool definitions
 ANTHROPIC_TOOLS = [
@@ -513,6 +775,54 @@ ANTHROPIC_TOOLS = [
             "type": "object",
             "properties": {
                 "save_path": {"type": "string", "description": "Optional path to save the screenshot. Defaults to temp directory."}
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "open_website",
+        "description": "Open a website URL in the default web browser.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Website URL to open. If scheme is omitted, https is assumed."}
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "open_local_file",
+        "description": "Open a local file under the project root folder. For .exe/.bat/.cmd you can pass arguments and capture execution feedback.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Relative or absolute path to a file under the project root folder."},
+                "arguments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional command-line arguments for .exe/.bat/.cmd files."
+                },
+                "capture_output": {
+                    "type": "boolean",
+                    "description": "When true, returns stdout/stderr/return_code for executable/script files. Defaults to true."
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Timeout in seconds for executable/script files. Range: 1-300. Defaults to 30."
+                }
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
+        "name": "close_local_file_process",
+        "description": "Close a running local media/app process under the project root. Prefer launch_id from open_local_file (when capture_output is false), or provide file_path for best-effort matching.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "launch_id": {"type": "string", "description": "Optional launch ID returned by open_local_file for background process launch."},
+                "file_path": {"type": "string", "description": "Optional file path to match running processes by executable path, command line, or open file handles."},
+                "force": {"type": "boolean", "description": "When true, forcibly kill matched processes instead of graceful terminate."}
             },
             "required": [],
         },
@@ -692,6 +1002,63 @@ OPENAI_TOOLS = [
                 "type": "object",
                 "properties": {
                     "save_path": {"type": "string", "description": "Optional path to save the screenshot. Defaults to temp directory."}
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_website",
+            "description": "Open a website URL in the default web browser.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Website URL to open. If scheme is omitted, https is assumed."}
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_local_file",
+            "description": "Open a local file under the project root folder. For .exe/.bat/.cmd you can pass arguments and capture execution feedback.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Relative or absolute path to a file under the project root folder."},
+                    "arguments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional command-line arguments for .exe/.bat/.cmd files."
+                    },
+                    "capture_output": {
+                        "type": "boolean",
+                        "description": "When true, returns stdout/stderr/return_code for executable/script files. Defaults to true."
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Timeout in seconds for executable/script files. Range: 1-300. Defaults to 30."
+                    }
+                },
+                "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_local_file_process",
+            "description": "Close a running local media/app process under the project root. Prefer launch_id from open_local_file (when capture_output is false), or provide file_path for best-effort matching.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "launch_id": {"type": "string", "description": "Optional launch ID returned by open_local_file for background process launch."},
+                    "file_path": {"type": "string", "description": "Optional file path to match running processes by executable path, command line, or open file handles."},
+                    "force": {"type": "boolean", "description": "When true, forcibly kill matched processes instead of graceful terminate."}
                 },
                 "required": [],
             },

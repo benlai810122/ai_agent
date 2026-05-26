@@ -1,0 +1,4 @@
+open_ai_key.yaml
+report/
+__pycache__/
+*.pyc

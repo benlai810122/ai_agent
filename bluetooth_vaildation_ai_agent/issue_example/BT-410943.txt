@@ -1,0 +1,14 @@
+Can not play music after BT Off/On then reconnect BT headset(Samsung Buds2 Pro)
+BT driver : 24.0.1.1
+ISST driver: 20.43.12446.0
+OS : 10.0.26200.7171
+Test Steps:
+1. Flash V17 BIOS & V15 EC. (not necessary)
+2. Preload V16 image and OOBE to desktop. (not necessary)
+3.Open BT,pair and connect to samsung buds2 pro BT headset
+4.Turn off unit BT,then turn on.
+5. Manual reconnect to samsung buds2 pro BT headset
+6.Play online music or local music.
+7.The music cannot play after turning on BT and connecting to samsung buds2 pro BT headset.(the music progress bar does not move)--issue
+FR: 1/20
+Two machines were tested 10 times each, and the issue occurred once.
