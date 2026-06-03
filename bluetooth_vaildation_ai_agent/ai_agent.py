@@ -7,9 +7,14 @@ import re
 from typing import Callable
 from datetime import datetime
 import httpx
-from regular_ai_agent_tools import ANTHROPIC_TOOLS, TOOL_FUNCTIONS, set_scheduler_notifier, list_scheduled_tasks
-from bluetooth_ai_agent_tools import BLUETOOTH_ANTHROPIC_TOOLS, BLUETOOTH_TOOL_FUNCTIONS
-from headset_ai_agent_tools import HEADSET_ANTHROPIC_TOOLS, HEADSET_TOOL_FUNCTIONS
+from tools.regular_tools.regular_ai_agent_tools import ANTHROPIC_TOOLS, TOOL_FUNCTIONS, set_scheduler_notifier, list_scheduled_tasks
+from tools.bluetooth_tools.bluetooth_ai_agent_tools import BLUETOOTH_ANTHROPIC_TOOLS, BLUETOOTH_TOOL_FUNCTIONS
+from tools.audio_headset_tools.headset_ai_agent_tools import HEADSET_ANTHROPIC_TOOLS, HEADSET_TOOL_FUNCTIONS
+from tools.bluetooth_tools.bluetooth_ws_ibterverify_tools import IBTERVERIFY_ANTHROPIC_TOOLS, IBTERVERIFY_TOOL_FUNCTIONS
+from tools.bluetooth_tools.bluetooth_ws_hci_tools import HCITOOL_ANTHROPIC_TOOLS, HCITOOL_TOOL_FUNCTIONS
+from tools.arduino_tools.arduino_ai_agent_tools import ARDUINO_ANTHROPIC_TOOLS, ARDUINO_TOOL_FUNCTIONS
+from tools.mouse_keyboard_tools.mouse_ai_Agent_tools import MOUSE_KEYBOARD_ANTHROPIC_TOOLS, MOUSE_KEYBOARD_TOOL_FUNCTIONS
+from tools.regular_tools.power_state_ai_agent_tools import POWER_STATE_ANTHROPIC_TOOLS, POWER_STATE_TOOL_FUNCTIONS
 from anthropic import Anthropic
 
 # Load API key from YAML config
@@ -25,8 +30,8 @@ http_client = httpx.Client(verify=False)
 client = Anthropic(base_url=base_url, auth_token=auth_token, http_client=http_client)
 
 # Merge all tools
-ALL_TOOLS = ANTHROPIC_TOOLS + BLUETOOTH_ANTHROPIC_TOOLS + HEADSET_ANTHROPIC_TOOLS
-ALL_TOOL_FUNCTIONS = {**TOOL_FUNCTIONS, **BLUETOOTH_TOOL_FUNCTIONS, **HEADSET_TOOL_FUNCTIONS}
+ALL_TOOLS = ANTHROPIC_TOOLS + BLUETOOTH_ANTHROPIC_TOOLS + HEADSET_ANTHROPIC_TOOLS + IBTERVERIFY_ANTHROPIC_TOOLS + HCITOOL_ANTHROPIC_TOOLS + ARDUINO_ANTHROPIC_TOOLS + MOUSE_KEYBOARD_ANTHROPIC_TOOLS + POWER_STATE_ANTHROPIC_TOOLS
+ALL_TOOL_FUNCTIONS = {**TOOL_FUNCTIONS, **BLUETOOTH_TOOL_FUNCTIONS, **HEADSET_TOOL_FUNCTIONS, **IBTERVERIFY_TOOL_FUNCTIONS, **HCITOOL_TOOL_FUNCTIONS, **ARDUINO_TOOL_FUNCTIONS, **MOUSE_KEYBOARD_TOOL_FUNCTIONS, **POWER_STATE_TOOL_FUNCTIONS}
 
 MODEL = "claude-4-5-sonnet"
 
@@ -37,44 +42,81 @@ LAST_AUTO_SUMMARY_EXECUTED_COUNT = 0
 PENDING_TEST_CONFIRMATIONS = {}
 
 SYSTEM_INSTRUCTION = (
+    # ── Role ──
     "You are a helpful AI assistant running on the user's laptop. "
     "You have access to tools that let you interact with the local system. "
-    "Use the available tools whenever the user asks about system info, time, files, opening websites, opening local files, closing local media/apps, etc. "
-    "For any headset or audio validation test, make sure system audio is not muted before and during playback checks. "
-    "When the user asks to play music or audio, use open_local_file to open the file from the 'music' subfolder inside the project root. "
-    "If no specific track is named, first call list_directory on the 'music' folder to discover available files, then open the first suitable one. "
+    "Use the available tools whenever the user asks about system info, time, files, "
+    "opening websites, opening local files, closing local media/apps, etc. "
+    "Always attempt to execute every test step automatically using the available tools. "
+    "Do NOT ask the user to perform steps manually unless there is truly no tool or equivalent method available. "
     "When calling tools, always provide ALL required parameters. "
-    "When creating files with content, use create_file with the content parameter, or use write_file with both file_path and content. "
-    "When asked to create or save any test report, always save it under the 'report' folder. "
-    "The report filename must follow this exact pattern: report_YYYYMMDD_HH_mm_ss. "
+    "Answer clearly and concisely. "
+    f"Your program is located at: {SCRIPT_DIR}\n\n"
+
+    # ── Audio / Playback ──
+    "For any headset or audio validation test, make sure system audio is not muted before and during playback checks. "
+    "When the user asks to play music or audio, use open_local_file to open the file from the 'test_assets/audio' subfolder inside the project root. "
+    "If no specific track is named, first call list_directory on the 'test_assets/audio' folder to discover available files, then open the first suitable one. "
+    "When running any audio playback related test item, if the user does not specify a playback duration, use 10 seconds as the default playback time. "
+    "For any audio-related test item, follow these steps in order:\n"
+    "  1) Play the file 'test_1k_tone.mp3' from the 'test_assets/audio' folder using open_local_file.\n"
+    "  2) While it is playing, capture a screenshot and analyze it for playback issues such as audio not playing or media player error codes.\n"
+    "  3) While it is still playing, use record_audio_output to record the headset audio output and save the recording inside the current test run folder.\n"
+    "  4) After recording finishes, stop the playback using close_media_player.\n"
+    "  5) Use analyze_audio_file on the recorded file to check audio quality (volume levels, clipping, silence, distortion).\n"
+    "  6) Include both the screenshot analysis and the audio quality analysis results in the test report.\n\n"
+
+    # ── Bluetooth ──
+    "When a test requires turning Bluetooth off and on, use set_bluetooth_radio_via_ui with turn_on=false then turn_on=true. "
+    "When a test requires disconnecting a Bluetooth device, use disconnect_bluetooth_via_ui with the device name. "
+    "When a test requires reconnecting a Bluetooth device, use reconnect_bluetooth_via_ui with the device name. "
+    "When a test requires checking Bluetooth connection status, use check_bluetooth_connection_status. "
+    "For Bluetooth 5 testing, always use ibterverify.exe located in the Utilities/ibterverify folder under the project root. "
+    "For Bluetooth I2S clock source checks, use hcitool.exe located at Utilities/hcitool/x64/hcitool.exe under the project root.\n\n"
+
+    # ── Arduino ──
+    "You can control an Arduino board connected via serial port to perform physical actions such as mouse clicking. "
+    "To use Arduino tools: first call arduino_board_check to find the board, then arduino_serial_connect to connect to its COM port, "
+    "then use arduino_mouse_click for an immediate mouse click or arduino_mouse_delay_click to click after a specified delay (in seconds).\n\n"
+
+    # ── File creation ──
+    "When creating files with content, use create_file with the content parameter, or use write_file with both file_path and content.\n\n"
+
+    # ── Report format ──
+    "When starting any test, first create a folder under the 'report' directory named report_YYYYMMDD_HHmmss (e.g. report_20260527_143000). "
+    "Save all test-related files, including logs, audio recordings, screenshots, and the final report, inside that test run folder. "
+    "The report filename must follow this exact pattern: report_YYYYMMDD_HHmmss (same format as the folder name). "
     "The report content must always include exactly three parts in this order: Test Item, Test Result, Summary. "
     "The report must also include Test Start Time and Test End Time. "
-    "If any error happens, the report must include Test Error Happened Time. "
+    "If any error happens, the report must include Test Error Happened Time.\n\n"
+
+    # ── Scheduled tasks ──
     "When running multi-step scheduled test flows, do not require a separate report-generation schedule. "
     "After the last scheduled test task finishes, automatically generate one final summary report that consolidates all scheduled test results."
-    "Answer clearly and concisely. "
-    f"Your program is located at: {SCRIPT_DIR}"
 )
 
 TEST_PRECHECK_SYSTEM_INSTRUCTION = (
     "You are preparing a test execution precheck. "
     "Do NOT call any tools in this step. "
     "Analyze what parts of the user's requested test can be done with currently available tools, and what parts cannot be done. "
+    "When evaluating capability, if a tool can achieve the same outcome through an equivalent method, count it as supported. "
+    "For example: 'turn off Bluetooth' can be done with set_bluetooth_radio_via_ui, 'reconnect headset' can be done with reconnect_bluetooth_via_ui, "
+    "'play music' can be done with open_local_file, 'check audio quality' can be done with record_audio_output + analyze_audio_file. "
+    "Do NOT mark a step as unsupported just because the exact UI path described in the test case is different from the tool's method. "
+    "Only mark a step as unsupported if there is genuinely no tool or equivalent approach available (e.g. reboot, shutdown, physical button press). "
     "Return a concise plan using this structure: "
-    "1) Planned Test Steps (numbered), "
-    "2) Unsupported Parts, "
+    "1) Planned Test Steps (numbered) — map each original test step to the tool(s) that will be used, "
+    "2) Unsupported Parts (only truly impossible steps), "
     "3) Capability Match (percentage), "
     "4) Ask for confirmation to start now (yes/no). "
-    "If a user asks for actions like reboot/shutdown and no direct tool exists, clearly mark those actions as unsupported. "
-    "The capability percentage should roughly reflect supported requested actions divided by total requested actions."
+    "The capability percentage should reflect the number of achievable steps (including equivalent methods) divided by total requested steps."
 )
 
 
 def _is_test_request(user_text: str) -> bool:
     text = user_text.lower()
     test_keywords = [
-        "test", "validate", "verification", "verify", "reconnect", "disconnect", "connect",
-        "bluetooth", "headset", "audio", "mic", "microphone", "speaker", "schedule",
+        "test", "validate", "verification", "verify", "schedule",
     ]
     return any(k in text for k in test_keywords)
 
@@ -130,7 +172,7 @@ def _extract_capability_percent(reply_text: str) -> int | None:
 
 def _print_step_start(step_index: int, fn_name: str, fn_args: dict, step_callback: Callable[[str], None] | None = None) -> None:
     """Print a clear step-start marker before each test/tool action."""
-    step_text = f"[TEST STEP START] Step {step_index}: {fn_name} | args={json.dumps(fn_args, default=str)}"
+    step_text = f"Step {step_index}: {fn_name} | args={json.dumps(fn_args, default=str)}"
     print(step_text, flush=True)
     if step_callback:
         try:
@@ -206,80 +248,7 @@ def _run_agent_turn(
         messages.append({"role": "assistant", "content": precheck_response.content})
         capability_percent = _extract_capability_percent(precheck_reply)
 
-        # If coverage is 100%, start immediately after showing the schedule.
-        if capability_percent == 100:
-            execute_text = (
-                f"Precheck complete with 100% capability match. Start now: {user_text}. "
-                "Execute the planned test steps immediately and report each major step result."
-            )
-            messages.append({"role": "user", "content": execute_text})
-
-            response = client.messages.create(
-                model=MODEL,
-                max_tokens=4096,
-                system=SYSTEM_INSTRUCTION,
-                messages=messages,
-                tools=ALL_TOOLS,
-            )
-
-            tool_step_index = 0
-            while any(block.type == "tool_use" for block in response.content):
-                assistant_content = response.content
-                messages.append({"role": "assistant", "content": assistant_content})
-
-                tool_results = []
-                for block in assistant_content:
-                    if block.type != "tool_use":
-                        continue
-
-                    fn_name = block.name
-                    fn_args = block.input if block.input else {}
-                    tool_step_index += 1
-                    _print_step_start(tool_step_index, fn_name, fn_args, step_callback=step_callback)
-                    if print_tool_logs:
-                        print(f"  [Tool: {fn_name}({fn_args})]")
-
-                    fn = ALL_TOOL_FUNCTIONS.get(fn_name)
-                    if fn:
-                        try:
-                            result = fn(**fn_args)
-                        except TypeError as e:
-                            result = {"error": f"Invalid arguments for {fn_name}: {e}"}
-                    else:
-                        result = {"error": f"Unknown function: {fn_name}"}
-
-                    if fn_name == "capture_screen" and isinstance(result, dict) and result.get("status") == "success":
-                        with open(result["file_path"], "rb") as img_file:
-                            img_b64 = base64.b64encode(img_file.read()).decode("utf-8")
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": [
-                                {"type": "text", "text": json.dumps(result, default=str)},
-                                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
-                            ],
-                        })
-                    else:
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result, default=str),
-                        })
-
-                messages.append({"role": "user", "content": tool_results})
-
-                response = client.messages.create(
-                    model=MODEL,
-                    max_tokens=4096,
-                    system=SYSTEM_INSTRUCTION,
-                    messages=messages,
-                    tools=ALL_TOOLS,
-                )
-
-            exec_reply = "".join(block.text for block in response.content if block.type == "text")
-            messages.append({"role": "assistant", "content": response.content})
-            return f"{precheck_reply}\n\n{exec_reply}"
-
+        # Always show the schedule and ask for user confirmation before executing.
         PENDING_TEST_CONFIRMATIONS[session_key] = user_text
         confirmation_prompt = (
             "\n\n---\n"

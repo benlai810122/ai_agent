@@ -367,15 +367,45 @@ def open_local_file(
         return {"error": str(e)}
 
 
+def _kill_pid(pid: int, force: bool = False, timeout: float = 3.0) -> str:
+    """Terminate a single process by PID using OS-native calls. Returns status string."""
+    import signal
+
+    if platform.system() == "Windows":
+        # Use taskkill — fast, no psutil needed
+        flag = "/F" if force else ""
+        cmd = f"taskkill {flag} /PID {pid} /T".strip()
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            return "terminated"
+        # Process may already be gone (exit code 128) or access denied
+        if "not found" in (result.stderr or "").lower():
+            return "already_stopped"
+        # Fallback: force kill if graceful failed
+        if not force:
+            cmd_force = f"taskkill /F /PID {pid} /T"
+            r2 = subprocess.run(cmd_force, shell=True, capture_output=True, text=True, timeout=timeout)
+            return "terminated" if r2.returncode == 0 else f"failed: {r2.stderr.strip()[:200]}"
+        return f"failed: {result.stderr.strip()[:200]}"
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM if not force else signal.SIGKILL)
+            return "terminated"
+        except ProcessLookupError:
+            return "already_stopped"
+        except PermissionError:
+            return "access_denied"
+
+
 def close_local_file_process(file_path: str = "", launch_id: str = "", force: bool = False) -> dict:
     """Close/terminate local process for media/executable files under the project root.
 
     Preferred: provide launch_id returned by open_local_file when capture_output is false.
-    Alternative: provide file_path and this tool will best-effort find matching processes.
+    Alternative: provide file_path and this tool will use OS-native commands (taskkill/pkill)
+    to find and stop matching processes without scanning all system processes.
     """
     try:
-        import psutil
-
+        # ── Path 1: tracked launch_id (fast, direct PID kill) ──
         if launch_id:
             with _OPENED_LOCAL_LOCK:
                 launch = _OPENED_LOCAL_PROCESSES.get(launch_id)
@@ -386,24 +416,7 @@ def close_local_file_process(file_path: str = "", launch_id: str = "", force: bo
             if not pid:
                 return {"error": f"No pid found for launch_id: {launch_id}"}
 
-            try:
-                proc = psutil.Process(pid)
-            except psutil.NoSuchProcess:
-                with _OPENED_LOCAL_LOCK:
-                    _OPENED_LOCAL_PROCESSES.pop(launch_id, None)
-                return {
-                    "status": "success",
-                    "launch_id": launch_id,
-                    "pid": pid,
-                    "already_stopped": True,
-                    "message": "Process already stopped.",
-                }
-
-            if force:
-                proc.kill()
-            else:
-                proc.terminate()
-            proc.wait(timeout=8)
+            status = _kill_pid(pid, force=force)
 
             with _OPENED_LOCAL_LOCK:
                 _OPENED_LOCAL_PROCESSES.pop(launch_id, None)
@@ -412,9 +425,11 @@ def close_local_file_process(file_path: str = "", launch_id: str = "", force: bo
                 "status": "success",
                 "launch_id": launch_id,
                 "pid": pid,
-                "message": "Tracked process terminated.",
+                "already_stopped": status == "already_stopped",
+                "message": f"Process {status}.",
             }
 
+        # ── Path 2: file_path matching via OS-native commands ──
         if not file_path or not file_path.strip():
             return {"error": "Provide either launch_id or file_path."}
 
@@ -429,35 +444,72 @@ def close_local_file_process(file_path: str = "", launch_id: str = "", force: bo
         if not os.path.exists(candidate_path):
             return {"error": f"File not found: {candidate_path}"}
 
-        target_lower = candidate_path.lower()
-        matched_pids = []
+        # Also check tracked processes first (instant match by file_path)
+        matched_from_tracked = []
+        with _OPENED_LOCAL_LOCK:
+            for lid, info in list(_OPENED_LOCAL_PROCESSES.items()):
+                if info.get("file_path", "").lower() == candidate_path.lower():
+                    matched_from_tracked.append((lid, info.get("pid")))
 
-        for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+        tracked_results = []
+        for lid, pid in matched_from_tracked:
+            if pid:
+                status = _kill_pid(pid, force=force)
+                tracked_results.append({"pid": pid, "status": status})
+            with _OPENED_LOCAL_LOCK:
+                _OPENED_LOCAL_PROCESSES.pop(lid, None)
+
+        # Use WMIC/tasklist + taskkill on Windows to find processes by image name
+        target_basename = os.path.basename(candidate_path)
+        os_results = []
+
+        if platform.system() == "Windows":
+            # Use wmic to find PIDs whose command line contains the file path (fast, no full scan)
             try:
-                exe = (proc.info.get("exe") or "").lower()
-                cmdline = " ".join(proc.info.get("cmdline") or []).lower()
+                wmic_cmd = (
+                    f'wmic process where "CommandLine like \'%%{target_basename}%%\'" '
+                    f'get ProcessId /format:list'
+                )
+                result = subprocess.run(
+                    wmic_cmd, shell=True, capture_output=True, text=True, timeout=5
+                )
+                pids_found = set()
+                for line in (result.stdout or "").splitlines():
+                    line = line.strip()
+                    if line.startswith("ProcessId="):
+                        try:
+                            pid_val = int(line.split("=", 1)[1])
+                            # Skip our own process
+                            if pid_val != os.getpid() and pid_val > 4:
+                                pids_found.add(pid_val)
+                        except ValueError:
+                            pass
 
-                is_match = target_lower == exe or target_lower in cmdline
-                if not is_match:
-                    try:
-                        open_files = proc.open_files() or []
-                    except (psutil.AccessDenied, psutil.NoSuchProcess):
-                        open_files = []
-                    for f in open_files:
-                        if (f.path or "").lower() == target_lower:
-                            is_match = True
-                            break
+                # Remove already-handled tracked PIDs
+                already_handled = {p for _, p in matched_from_tracked}
+                pids_found -= already_handled
 
-                if is_match:
-                    if force:
-                        proc.kill()
-                    else:
-                        proc.terminate()
-                    matched_pids.append(proc.pid)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
+                for pid_val in pids_found:
+                    status = _kill_pid(pid_val, force=force)
+                    os_results.append({"pid": pid_val, "status": status})
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            # On Linux/macOS, use pkill
+            try:
+                flag = "-9" if force else "-15"
+                subprocess.run(
+                    ["pkill", flag, "-f", target_basename],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
 
-        if not matched_pids:
+        all_results = tracked_results + os_results
+        terminated_pids = [r["pid"] for r in all_results if r["status"] == "terminated"]
+        already_stopped = [r["pid"] for r in all_results if r["status"] == "already_stopped"]
+
+        if not all_results:
             return {
                 "status": "not_found",
                 "file_path": candidate_path,
@@ -467,8 +519,61 @@ def close_local_file_process(file_path: str = "", launch_id: str = "", force: bo
         return {
             "status": "success",
             "file_path": candidate_path,
-            "terminated_pids": matched_pids,
-            "count": len(matched_pids),
+            "terminated_pids": terminated_pids,
+            "already_stopped_pids": already_stopped,
+            "count": len(terminated_pids),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def close_media_player(force: bool = False) -> dict:
+    """Close the 'Media Player' app by window title and known process names."""
+    try:
+        flag = "/F" if force else ""
+        closed = []
+
+        # 1. Try closing by window title "Media Player" (catches any variant)
+        cmd_title = f'taskkill {flag} /FI "WINDOWTITLE eq Media Player" /T'.strip()
+        try:
+            result = subprocess.run(
+                cmd_title, shell=True, capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                closed.append("Media Player (by window title)")
+        except subprocess.TimeoutExpired:
+            pass
+
+        # 2. Also try by known process names as fallback
+        for proc_name in ["Microsoft.Media.Player.exe", "wmplayer.exe"]:
+            cmd = f"taskkill {flag} /IM {proc_name} /T".strip()
+            try:
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=3,
+                )
+                combined = ((result.stdout or "") + (result.stderr or "")).lower()
+                if result.returncode == 0:
+                    closed.append(proc_name)
+                elif "not found" not in combined and "no tasks" not in combined and not force:
+                    cmd_f = f"taskkill /F /IM {proc_name} /T"
+                    r2 = subprocess.run(
+                        cmd_f, shell=True, capture_output=True, text=True, timeout=3,
+                    )
+                    if r2.returncode == 0:
+                        closed.append(proc_name)
+            except subprocess.TimeoutExpired:
+                pass
+
+        if closed:
+            return {
+                "status": "success",
+                "closed": closed,
+                "message": f"Closed {', '.join(closed)}.",
+            }
+
+        return {
+            "status": "not_found",
+            "message": "No Media Player is running.",
         }
     except Exception as e:
         return {"error": str(e)}
@@ -658,12 +763,13 @@ TOOL_FUNCTIONS = {
     "open_website": open_website,
     "open_local_file": open_local_file,
     "close_local_file_process": close_local_file_process,
+    "close_media_player": close_media_player,
     "schedule_task_in_minutes": schedule_task_in_minutes,
     "list_scheduled_tasks": list_scheduled_tasks,
     "cancel_scheduled_task": cancel_scheduled_task,
 }
 
-TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, open_website, open_local_file, close_local_file_process, schedule_task_in_minutes, list_scheduled_tasks, cancel_scheduled_task]
+TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, open_website, open_local_file, close_local_file_process, close_media_player, schedule_task_in_minutes, list_scheduled_tasks, cancel_scheduled_task]
 
 # Anthropic-compatible tool definitions
 ANTHROPIC_TOOLS = [
@@ -823,6 +929,17 @@ ANTHROPIC_TOOLS = [
                 "launch_id": {"type": "string", "description": "Optional launch ID returned by open_local_file for background process launch."},
                 "file_path": {"type": "string", "description": "Optional file path to match running processes by executable path, command line, or open file handles."},
                 "force": {"type": "boolean", "description": "When true, forcibly kill matched processes instead of graceful terminate."}
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "close_media_player",
+        "description": "Close Windows Media Player (wmplayer.exe or Microsoft.Media.Player.exe).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "force": {"type": "boolean", "description": "When true, forcibly kill the player instead of graceful terminate."}
             },
             "required": [],
         },
@@ -1059,6 +1176,20 @@ OPENAI_TOOLS = [
                     "launch_id": {"type": "string", "description": "Optional launch ID returned by open_local_file for background process launch."},
                     "file_path": {"type": "string", "description": "Optional file path to match running processes by executable path, command line, or open file handles."},
                     "force": {"type": "boolean", "description": "When true, forcibly kill matched processes instead of graceful terminate."}
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_media_player",
+            "description": "Close Windows Media Player (wmplayer.exe or Microsoft.Media.Player.exe).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "force": {"type": "boolean", "description": "When true, forcibly kill the player instead of graceful terminate."}
                 },
                 "required": [],
             },

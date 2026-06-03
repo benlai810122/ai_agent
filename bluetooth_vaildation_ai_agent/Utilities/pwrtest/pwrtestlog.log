@@ -1,0 +1,44 @@
+Start: PwrTest
+SYSTEM_POWER_CAPABILITIES 
+    SystemS1StateSupported = 0 
+    SystemS2StateSupported = 0 
+    SystemS3StateSupported = 0 
+    SystemS4StateSupported = 1 
+    SystemS5StateSupported = 1 
+    WakeAlarmPresent       = 0 
+    AcOnLineWakeSupported  = 0 
+    RtcWakeSupported       = S4 
+    FastSystemS4           = 0 
+    VideoDimPresent        = 1 
+    HiberFilePresent       = 1 
+    AoAc                   = 1 
+Error: Setting the AC value for GUID_LOCK_CONSOLE_ON_WAKE failed because the setting is restricted by group policy.
+    File: base\power\tools\pwrtest\exe\scenariosleep.cpp
+    Line: 550
+    Error Code: 0x4ec
+Error: Setting the DC value for GUID_LOCK_CONSOLE_ON_WAKE failed because the setting is restricted by group policy.
+    File: base\power\tools\pwrtest\exe\scenariosleep.cpp
+    Line: 558
+    Error Code: 0x4ec
+
+No.1 of 1 Transition -- TargetState: S4
+  TargetState:       S4
+  EffectiveState:    S4
+  SleepTimeMs:       5658    
+  HiberPagesWritten: 1290246 
+  HiberWriteTimeMs:  16892   
+  HiberReadTimeMs:   8945    
+  BiosInitTimeMs:    6234    
+  DriverWakeTimeMs:  1264    
+  Transition StartTime: 06/02/2026 16:00:11::165
+  Transition EndTime:   06/02/2026 16:01:32::373
+No.1 of 1 Transition -- Complete
+Error: Setting the AC value for GUID_LOCK_CONSOLE_ON_WAKE failed because the setting is restricted by group policy.
+    File: base\power\tools\pwrtest\exe\scenariosleep.cpp
+    Line: 550
+    Error Code: 0x4ec
+Error: Setting the DC value for GUID_LOCK_CONSOLE_ON_WAKE failed because the setting is restricted by group policy.
+    File: base\power\tools\pwrtest\exe\scenariosleep.cpp
+    Line: 558
+    Error Code: 0x4ec
+End: Pass, PwrTest, (null)

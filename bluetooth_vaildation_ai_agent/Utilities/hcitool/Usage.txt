@@ -1,0 +1,55 @@
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  HCI Tool version 1.2.0.2 - Release Notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+HCI Tool changes to support MSI and UWD version of Test mode drivers.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  HCI Tool version 1.2.0.1 - Release Notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Updated exe file version with the tool version.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  HCI Tool version 1.2 - Release Notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+HCI Tool changes to load dependent library modules from Driver store.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  HCI Tool version 1.1 - Release Notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+HCI Tool allows to send Vendor Specific HCI commands to controller when Bluetooth driver in Operational mode.
+HCI Tool allows to read the Bluetooth adapter Address when running in Test mode.
+HCI Tool support to control BT LED Power state when Bluetooth driver in Operational mode.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  HCI Tool version 2.0 - Release Notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+HCI Tool allows to support ibtpci operatation and test mode driver.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  HCI Tool version 2.0.0.1 - Release Notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+HCI Tool fix to support ibtusb/ibtpci in operatation mode without debuginterface.
+
+The HCI Tool need to be launched in Administrative console to be able to send vendor specific commands.
+
+Usage :
+hcitool.exe [option]
+
+ [options]:
+     -v        Print Hci Tool version
+
+     -h        Print help/usage guide
+
+  Bluetooth driver in operational Mode:
+     -c <Command string>    Send VS hci commands to controller
+               eg: Read intel firmware version command, 'hcitool.exe -c 05FC00'
+
+     -ledon    Turn on BT LED
+
+     -ledoff   Turn off BT LED
+
+  Bluetooth driver in test Mode:
+     rdbdaddr  Read Bluetooth device address in Test mode.
+               eg: Read bluetooth device Address command, 'hcitool.exe rdbdaddr'
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

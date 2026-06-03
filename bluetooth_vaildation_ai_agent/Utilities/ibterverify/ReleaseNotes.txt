@@ -1,0 +1,46 @@
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  ibterverify - Release Notes
+
+  Tool to verify Bluetooth Platform Level Device Reset function
+  This tool is only to test PLDR supportiveness purpose , should not apply to platform functionality or stability test.
+  Recommend to use ibterverify tool without paired BT device.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Ver 1.0
+    - Added option -b to get tool verison
+    - Need BT driver version 22.60 or later
+
+Ver 1.1
+    - Use Asynchronous mechanism to verify PLDR support
+
+Ver 1.2
+    - Support generic driver interface to verify PLDR support
+
+Ver 1.2.0.1
+    - Updated exe file version with tool version
+
+Ver 1.3.0.0
+    - Added Product reset support
+    - Restart BT after PLDR test to disable test mode
+
+Ver 1.4.0.0
+    - Added Support for Config/Query Reset Methods
+
+Ver 1.4.0.1
+    - Bug fix to handle PLDR Registry query exception handling.
+
+Ver 2.0.0.0
+    - Added PLDR support for PCI driver.
+
+Ver 2.1.0.0
+    - Added Product Reset support for PCI driver
+
+Ver 2.2.0.0
+	- Tool Supports PLDR only for PCI or USB drivers for OEM's
+
+Ver 2.3.0.0
+	- Tool Updated to Support Dual Bluetooth Radio for PCI drivers
+
+Ver 2.4.0.0
+	- Tool Updated to Support latest BT virtual hardware ids.

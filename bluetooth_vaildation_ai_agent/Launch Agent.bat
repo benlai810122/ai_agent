@@ -1,5 +1,14 @@
 @echo off
 setlocal
+
+:: ── Auto-elevate to administrator ──
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Requesting administrator privileges...
+    powershell -Command "Start-Process '%~f0' -Verb RunAs"
+    exit /b
+)
+
 title Intel Validation AI Agent
 cd /d "%~dp0"
 

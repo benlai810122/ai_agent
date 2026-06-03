@@ -6,8 +6,8 @@ Test Steps:
 1. Flash V17 BIOS & V15 EC. (not necessary)
 2. Preload V16 image and OOBE to desktop. (not necessary)
 3.Open BT,pair and connect to samsung buds2 pro BT headset
-4.Turn off unit BT,then turn on.
-5. Manual reconnect to samsung buds2 pro BT headset
+4.Turn off laptop BT,then turn on.
+5. reconnect to samsung buds2 pro BT headset from bluetooth & device page
 6.Play online music or local music.
 7.The music cannot play after turning on BT and connecting to samsung buds2 pro BT headset.(the music progress bar does not move)--issue
 FR: 1/20

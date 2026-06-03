@@ -1,5 +1,6 @@
 import subprocess
 import json
+import os
 
 
 def get_audio_endpoints() -> dict:
@@ -179,36 +180,6 @@ Write-Output "RightVolume=$rightPct"
         return {"error": str(e)}
 
 
-def test_audio_output(device_name: str = "") -> dict:
-    """Test audio output by playing a short system beep sound. Optionally specify a device name to verify it's active."""
-    try:
-        import winsound
-        # If a device name is given, verify it exists as an active output endpoint
-        if device_name:
-            endpoint_check = check_headset_endpoint(device_name)
-            if endpoint_check.get("status") == "not_found":
-                return {
-                    "status": "device_not_found",
-                    "message": f"Audio output device '{device_name}' not found. Cannot test.",
-                }
-            if not endpoint_check.get("has_output", False):
-                return {
-                    "status": "no_output_endpoint",
-                    "message": f"'{device_name}' has no output endpoint registered.",
-                    "endpoints": endpoint_check.get("endpoints", []),
-                }
-
-        # Play a test beep (frequency=1000Hz, duration=500ms)
-        winsound.Beep(1000, 5000)
-        return {
-            "status": "success",
-            "message": "Test beep played successfully (1000Hz, 500ms). Ask the user if they heard it.",
-            "device_tested": device_name if device_name else "default output device",
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
 def test_audio_input(duration: int = 3) -> dict:
     """Test audio input (microphone) by recording a short sample and checking if sound was captured."""
     try:
@@ -344,14 +315,189 @@ try {{
         return {"error": str(e)}
 
 
+def record_audio_output(save_path: str, duration: int = 10, device_name: str = "") -> dict:
+    """Record system audio output (speaker/headset playback) to the specified WAV path.
+
+    Uses the soundcard library for WASAPI loopback recording on Windows.
+    """
+    try:
+        if not save_path or not isinstance(save_path, str):
+            return {"error": "save_path is required."}
+
+        if duration <= 0 or duration > 300:
+            return {"error": "duration must be between 1 and 300 seconds."}
+
+        # Optional headset verification before recording.
+        if device_name:
+            endpoint_check = check_headset_endpoint(device_name)
+            if endpoint_check.get("status") == "not_found":
+                return {
+                    "status": "device_not_found",
+                    "message": f"Audio output device '{device_name}' not found. Cannot record output.",
+                }
+            if not endpoint_check.get("has_output", False):
+                return {
+                    "status": "no_output_endpoint",
+                    "message": f"'{device_name}' has no output endpoint registered.",
+                    "endpoints": endpoint_check.get("endpoints", []),
+                }
+
+        abs_save_path = os.path.abspath(save_path)
+        os.makedirs(os.path.dirname(abs_save_path), exist_ok=True)
+
+        try:
+            import soundcard as sc
+            import numpy as np
+            from scipy.io import wavfile
+        except ImportError as ie:
+            return {
+                "status": "dependency_missing",
+                "message": f"Required library not installed: {ie}. Run: pip install soundcard numpy scipy",
+            }
+
+        sample_rate = 48000
+        # Get the default speaker for loopback recording
+        default_speaker = sc.default_speaker()
+        if default_speaker is None:
+            return {
+                "status": "no_speaker",
+                "message": "No default audio output device found.",
+            }
+
+        # Record via loopback (captures what's playing through speakers/headset)
+        mic = sc.get_microphone(id=str(default_speaker.name), include_loopback=True)
+        if mic is None:
+            return {
+                "status": "loopback_unavailable",
+                "message": f"Could not open loopback device for '{default_speaker.name}'.",
+            }
+
+        num_frames = sample_rate * duration
+        with mic.recorder(samplerate=sample_rate, channels=2) as recorder:
+            audio_data = recorder.record(numframes=num_frames)
+
+        # Convert float32 [-1.0, 1.0] to int16 for WAV
+        audio_int16 = np.clip(audio_data * 32767, -32768, 32767).astype(np.int16)
+        wavfile.write(abs_save_path, sample_rate, audio_int16)
+
+        if not os.path.exists(abs_save_path):
+            return {
+                "status": "recording_failed",
+                "message": "Recording finished but output file was not created.",
+            }
+
+        file_size = os.path.getsize(abs_save_path)
+        return {
+            "status": "success",
+            "message": "Audio output recorded successfully via loopback.",
+            "recording_path": abs_save_path,
+            "duration_seconds": duration,
+            "file_size_bytes": file_size,
+            "sample_rate": sample_rate,
+            "channels": 2,
+            "device_tested": device_name if device_name else default_speaker.name,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def analyze_audio_file(file_path: str) -> dict:
+    """Analyze a recorded audio file using ffprobe to extract audio quality metrics such as duration, codec, sample rate, channels, bit rate, and peak/mean volume levels."""
+    try:
+        if not file_path or not isinstance(file_path, str):
+            return {"error": "file_path is required."}
+
+        abs_path = os.path.abspath(file_path)
+        if not os.path.exists(abs_path):
+            return {"error": f"File not found: {abs_path}"}
+
+        file_size = os.path.getsize(abs_path)
+        if file_size == 0:
+            return {"status": "empty_file", "message": "The audio file is empty (0 bytes). Recording may have failed.", "file_path": abs_path}
+
+        # Check ffprobe availability
+        ffprobe_check = subprocess.run(
+            ['powershell', '-Command', 'Get-Command ffprobe -ErrorAction SilentlyContinue | Select-Object -First 1'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if not ffprobe_check.stdout.strip():
+            return {"status": "ffprobe_missing", "message": "ffprobe is required to analyze audio files. Please install ffmpeg (includes ffprobe) and ensure it is in PATH."}
+
+        # Get stream info (codec, sample rate, channels, bit rate, duration)
+        probe_cmd = [
+            'ffprobe', '-v', 'error',
+            '-select_streams', 'a:0',
+            '-show_entries', 'stream=codec_name,sample_rate,channels,bit_rate,duration',
+            '-show_entries', 'format=duration,size,bit_rate',
+            '-of', 'json',
+            abs_path,
+        ]
+        probe_proc = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
+        if probe_proc.returncode != 0:
+            return {"status": "probe_failed", "message": "ffprobe failed to read audio stream info.", "stderr": probe_proc.stderr[-500:]}
+
+        probe_data = json.loads(probe_proc.stdout)
+        stream = probe_data.get("streams", [{}])[0] if probe_data.get("streams") else {}
+        fmt = probe_data.get("format", {})
+
+        # Get volume stats (peak and mean) via ffmpeg volumedetect filter
+        vol_cmd = [
+            'ffmpeg', '-i', abs_path,
+            '-af', 'volumedetect',
+            '-f', 'null', '-',
+        ]
+        vol_proc = subprocess.run(vol_cmd, capture_output=True, text=True, timeout=60)
+        import re as _re
+        vol_stderr = vol_proc.stderr or ""
+        mean_match = _re.search(r'mean_volume:\s*([\-\d.]+)\s*dB', vol_stderr)
+        max_match = _re.search(r'max_volume:\s*([\-\d.]+)\s*dB', vol_stderr)
+
+        mean_volume = float(mean_match.group(1)) if mean_match else None
+        max_volume = float(max_match.group(1)) if max_match else None
+
+        # Determine quality assessment
+        issues = []
+        duration_sec = float(stream.get("duration") or fmt.get("duration") or 0)
+        if duration_sec < 1:
+            issues.append("Recording duration is less than 1 second — may indicate a failed capture.")
+        if mean_volume is not None and mean_volume < -60:
+            issues.append(f"Mean volume is very low ({mean_volume} dB) — audio may be silent or nearly inaudible.")
+        if max_volume is not None and max_volume >= 0:
+            issues.append(f"Max volume is {max_volume} dB — audio is clipping (digital distortion).")
+        if mean_volume is not None and max_volume is not None and (max_volume - mean_volume) < 1:
+            issues.append("Very low dynamic range — possible constant-level noise or distortion.")
+
+        quality = "PASS" if not issues else "FAIL"
+
+        return {
+            "status": "success",
+            "file_path": abs_path,
+            "file_size_bytes": file_size,
+            "codec": stream.get("codec_name", "unknown"),
+            "sample_rate": stream.get("sample_rate", "unknown"),
+            "channels": stream.get("channels", "unknown"),
+            "bit_rate": stream.get("bit_rate") or fmt.get("bit_rate", "unknown"),
+            "duration_seconds": duration_sec,
+            "mean_volume_dB": mean_volume,
+            "max_volume_dB": max_volume,
+            "quality": quality,
+            "issues": issues if issues else ["No issues detected."],
+        }
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "message": "Audio analysis timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # Map of function name -> callable
 HEADSET_TOOL_FUNCTIONS = {
     "get_audio_endpoints": get_audio_endpoints,
     "check_headset_endpoint": check_headset_endpoint,
     "get_audio_volume": get_audio_volume,
-    "test_audio_output": test_audio_output,
     "test_audio_input": test_audio_input,
     "set_default_audio_device": set_default_audio_device,
+    "record_audio_output": record_audio_output,
+    "analyze_audio_file": analyze_audio_file,
 }
 
 # Anthropic-compatible tool definitions
@@ -378,17 +524,6 @@ HEADSET_ANTHROPIC_TOOLS = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "name": "test_audio_output",
-        "description": "Test audio output by playing a short beep sound. Optionally specify a device name to verify it's an active output endpoint first.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "device_name": {"type": "string", "description": "Optional name of the audio output device to verify before testing."}
-            },
-            "required": [],
-        },
-    },
-    {
         "name": "test_audio_input",
         "description": "Test audio input (microphone) by recording a short sample and checking if sound was captured.",
         "input_schema": {
@@ -409,6 +544,30 @@ HEADSET_ANTHROPIC_TOOLS = [
                 "direction": {"type": "string", "enum": ["input", "output"], "description": "Whether to set as default input (microphone) or output (speaker/headphone). Defaults to 'output'."}
             },
             "required": ["device_name"],
+        },
+    },
+    {
+        "name": "record_audio_output",
+        "description": "Record system audio output playback and save it to a specified path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "save_path": {"type": "string", "description": "Output file path (recommended .wav) for the recording."},
+                "duration": {"type": "integer", "description": "Recording duration in seconds. Defaults to 10. Range: 1-300."},
+                "device_name": {"type": "string", "description": "Optional headset name to verify output endpoint before recording."}
+            },
+            "required": ["save_path"],
+        },
+    },
+    {
+        "name": "analyze_audio_file",
+        "description": "Analyze a recorded audio file for quality metrics including codec, sample rate, channels, duration, and volume levels (mean/peak). Returns a PASS/FAIL quality assessment.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Path to the audio file to analyze (WAV, MP3, etc.)."}
+            },
+            "required": ["file_path"],
         },
     },
 ]

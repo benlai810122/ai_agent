@@ -1,0 +1,43 @@
+<PwrTestLog date="06/02/2026" time="16:00:10" filename="C:\Users\benlaix\auto_workspace\ai_research\bluetooth_vaildation_ai_agent\Utilities\pwrtest\pwrtestlog.xml">
+  <SystemInformation>
+    <ComputerName>BENLAIX-MOBL</ComputerName>
+    <OSBuildNumber>26100</OSBuildNumber>
+    <SystemManufacturer>HP</SystemManufacturer>
+    <SystemProductName>HP EliteBook 840 G8 Notebook PC</SystemProductName>
+    <BIOSVersion>T37 Ver. 01.22.00</BIOSVersion>
+    <BIOSReleaseDate>08/21/2025</BIOSReleaseDate>
+    <ProcessorCount>8</ProcessorCount>
+    <ProcessorPackageCount>1</ProcessorPackageCount>
+  </SystemInformation>
+  <SYSTEM_POWER_CAPABILITIES>
+    <SystemS1StateSupported>0</SystemS1StateSupported>
+    <SystemS2StateSupported>0</SystemS2StateSupported>
+    <SystemS3StateSupported>0</SystemS3StateSupported>
+    <SystemS4StateSupported>1</SystemS4StateSupported>
+    <SystemS5StateSupported>1</SystemS5StateSupported>
+    <WakeAlarmPresent>0</WakeAlarmPresent>
+    <AcOnLineWakeSupported>0</AcOnLineWakeSupported>
+    <RtcWakeSupported>4</RtcWakeSupported>
+    <FastSystemS4>0</FastSystemS4>
+    <VideoDimPresent>1</VideoDimPresent>
+    <HiberFilePresent>1</HiberFilePresent>
+    <AoAc>1</AoAc>
+  </SYSTEM_POWER_CAPABILITIES>
+  <SleepScenario>
+    <SleepTransitions hybrid="1" delay="10" sleeptime="30" IgnoreUsbHub="0" EndTransitionEventTimeout="120">
+      <SleepTransition number="0" status="4522060">
+        <StartT>06/02/2026 16:00:11</StartT>
+        <EndT>06/02/2026 16:01:32</EndT>
+        <Duration>00:01:21</Duration>
+        <TargetState>4</TargetState>
+        <EffectiveState>4</EffectiveState>
+        <Suspend>5658</Suspend>
+        <BIOSInit>6234</BIOSInit>
+        <DriverInit>1264</DriverInit>
+        <HiberPagesWritten>1290246</HiberPagesWritten>
+        <HiberRead>8945</HiberRead>
+        <HiberWrite>16892</HiberWrite>
+      </SleepTransition>
+    </SleepTransitions>
+  </SleepScenario>
+</PwrTestLog>
