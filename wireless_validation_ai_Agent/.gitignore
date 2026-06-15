@@ -1,4 +1,5 @@
 open_ai_key.yaml
 report/
+test_assets/driver/
 __pycache__/
 *.pyc

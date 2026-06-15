@@ -1,0 +1,58 @@
+## ISST Driver Installation Test
+
+### Overview
+Verify that the ISST (Intel Smart Sound Technology) driver can be correctly installed
+and upgraded/downgraded across the following versions:
+
+- v20.40.12315.0  (referred to as "315")
+- v20.40.12350.0  (referred to as "350")
+- v20.40.12741.9_HF  (referred to as "741")
+
+Driver packages are located under:
+  test_assets/driver/isst_driver/
+
+### Test Flow
+
+Step 1 – Check the current installed ISST driver version.
+  - Use get_isst_driver_version to enumerate all installed ISST driver packages.
+  - Identify the version number from the "Driver Version" field of each package.
+
+Step 2 – Branch based on the detected version:
+
+  Case A: Current version is 315 (v20.40.12315.0) or 350 (v20.40.12350.0)
+    2A-1. Install the 741 driver directly.
+           INF path (Production):
+             test_assets/driver/isst_driver/Intel_SST_MTL_ARL_v20.40.12741.9_HF/
+             Intel(R)_SST_MTL_ARL_v20.40.12741.9_HF/QS_Cert/Drivers/IntcAudioBus.inf
+             (repeat for each .inf file under QS_Cert/Drivers/ and QS_Cert/Extensions/)
+    2A-2. Verify installation by running get_isst_driver_version again and confirming
+           all packages report version 20.40.12741.9.
+
+  Case B: Current version is 741 (v20.40.12741.9_HF)
+    2B-1. Uninstall the existing 741 driver.
+           Use uninstall_isst_driver with the original INF names (e.g., IntcAudioBus.inf,
+           IntcBTAu.inf, IntcBtLE.inf, IntcDMic.inf, IntcOED.inf, etc.).
+    2B-2. Install the 315 driver.
+           INF path (Production):
+             test_assets/driver/isst_driver/Intel_SST_MTL_ARL_v20.40.12315.0/
+             Intel(R)_SST_MTL_ARL_v20.40.12315.0/Production/Drivers/IntcAudioBus.inf
+             (repeat for each .inf file under Production/Drivers/ and Production/Extensions/)
+    2B-3. Verify installation by running get_isst_driver_version and confirming
+           all packages report version 20.40.12315.0.
+    2B-4. Install the 741 driver on top (upgrade path).
+           INF path (QS_Cert):
+             test_assets/driver/isst_driver/Intel_SST_MTL_ARL_v20.40.12741.9_HF/
+             Intel(R)_SST_MTL_ARL_v20.40.12741.9_HF/QS_Cert/Drivers/IntcAudioBus.inf
+             (repeat for each .inf file under QS_Cert/Drivers/ and QS_Cert/Extensions/)
+    2B-5. Verify installation by running get_isst_driver_version and confirming
+           all packages report version 20.40.12741.9.
+
+### Pass Criteria
+- All pnputil install calls return status "success".
+- get_isst_driver_version confirms the expected version after each install step.
+- No driver packages remain from the prior version after uninstall (verified_deleted = true).
+
+### Notes
+- All driver installs must be run with Administrator privileges.
+- Prefer Production folder; fall back to QS_Cert if Production is not available.
+- If no ISST driver is currently installed, treat the state as Case A and install 741 directly.
