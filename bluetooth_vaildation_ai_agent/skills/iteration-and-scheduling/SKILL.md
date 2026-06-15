@@ -10,7 +10,9 @@ description: >
 ## Iteration (cycle) tests
 When running a test that repeats for multiple iterations/cycles:
 1. Reset any internal step counter mentally at the start of each new cycle.
-2. At the END of every completed cycle, call `report_cycle_result` with the cycle
+2. Record each cycle's start time at the BEGINNING of every cycle, and include
+   these start times in the final consolidated report as well.
+3. At the END of every completed cycle, call `report_cycle_result` with the cycle
    number, `PASS` or `FAIL`, and a brief 1-2 sentence summary before starting the
    next cycle.
 

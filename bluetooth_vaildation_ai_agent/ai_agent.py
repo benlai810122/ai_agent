@@ -15,6 +15,8 @@ from tools.bluetooth_tools.bluetooth_ws_hci_tools import HCITOOL_ANTHROPIC_TOOLS
 from tools.arduino_tools.arduino_ai_agent_tools import ARDUINO_ANTHROPIC_TOOLS, ARDUINO_TOOL_FUNCTIONS
 from tools.mouse_keyboard_tools.mouse_ai_Agent_tools import MOUSE_KEYBOARD_ANTHROPIC_TOOLS, MOUSE_KEYBOARD_TOOL_FUNCTIONS
 from tools.regular_tools.power_state_ai_agent_tools import POWER_STATE_ANTHROPIC_TOOLS, POWER_STATE_TOOL_FUNCTIONS
+from tools.driver_install_tools.isst_driver_install_ai_agent_tools import ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS, ISST_DRIVER_INSTALL_TOOL_FUNCTIONS
+from tools.wrt_tools.wrt_ai_agent_tools import WRT_ANTHROPIC_TOOLS, WRT_TOOL_FUNCTIONS
 from anthropic import Anthropic
 
 # Load API key from YAML config
@@ -30,8 +32,8 @@ http_client = httpx.Client(verify=False)
 client = Anthropic(base_url=base_url, auth_token=auth_token, http_client=http_client)
 
 # Merge all tools
-ALL_TOOLS = ANTHROPIC_TOOLS + BLUETOOTH_ANTHROPIC_TOOLS + HEADSET_ANTHROPIC_TOOLS + IBTERVERIFY_ANTHROPIC_TOOLS + HCITOOL_ANTHROPIC_TOOLS + ARDUINO_ANTHROPIC_TOOLS + MOUSE_KEYBOARD_ANTHROPIC_TOOLS + POWER_STATE_ANTHROPIC_TOOLS
-ALL_TOOL_FUNCTIONS = {**TOOL_FUNCTIONS, **BLUETOOTH_TOOL_FUNCTIONS, **HEADSET_TOOL_FUNCTIONS, **IBTERVERIFY_TOOL_FUNCTIONS, **HCITOOL_TOOL_FUNCTIONS, **ARDUINO_TOOL_FUNCTIONS, **MOUSE_KEYBOARD_TOOL_FUNCTIONS, **POWER_STATE_TOOL_FUNCTIONS}
+ALL_TOOLS = ANTHROPIC_TOOLS + BLUETOOTH_ANTHROPIC_TOOLS + HEADSET_ANTHROPIC_TOOLS + IBTERVERIFY_ANTHROPIC_TOOLS + HCITOOL_ANTHROPIC_TOOLS + ARDUINO_ANTHROPIC_TOOLS + MOUSE_KEYBOARD_ANTHROPIC_TOOLS + POWER_STATE_ANTHROPIC_TOOLS + ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS + WRT_ANTHROPIC_TOOLS
+ALL_TOOL_FUNCTIONS = {**TOOL_FUNCTIONS, **BLUETOOTH_TOOL_FUNCTIONS, **HEADSET_TOOL_FUNCTIONS, **IBTERVERIFY_TOOL_FUNCTIONS, **HCITOOL_TOOL_FUNCTIONS, **ARDUINO_TOOL_FUNCTIONS, **MOUSE_KEYBOARD_TOOL_FUNCTIONS, **POWER_STATE_TOOL_FUNCTIONS, **ISST_DRIVER_INSTALL_TOOL_FUNCTIONS, **WRT_TOOL_FUNCTIONS}
 
 MODEL = "claude-4-5-sonnet"
 
@@ -41,8 +43,90 @@ SCHEDULED_MESSAGES_LOCK = threading.Lock()
 LAST_AUTO_SUMMARY_EXECUTED_COUNT = 0
 PENDING_TEST_CONFIRMATIONS = {}
 
-SYSTEM_INSTRUCTION = (
-    # ── Role ──
+# ── Agent Skills (progressive disclosure) ──────────────────────
+# Instead of sending one giant system prompt every request, the detailed
+# instructions live in skills/<name>/SKILL.md files. Only each skill's short
+# name + description is always in the system prompt. The model loads the full
+# body of a skill ON DEMAND by calling the load_skill tool. This keeps each
+# request small and avoids hitting the model context limit.
+SKILLS_DIR = os.path.join(SCRIPT_DIR, "skills")
+
+
+def _parse_skill_file(file_path: str) -> dict | None:
+    """Parse a SKILL.md file into {name, description, body}.
+
+    Expected format:
+        ---
+        name: <skill name>
+        description: <text>
+        ---
+        <markdown body>
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return None
+
+    if not content.lstrip().startswith("---"):
+        return None
+
+    # Split off the YAML frontmatter between the first two '---' fences.
+    stripped = content.lstrip()
+    parts = stripped.split("---", 2)
+    if len(parts) < 3:
+        return None
+
+    frontmatter_raw, body = parts[1], parts[2]
+    try:
+        meta = yaml.safe_load(frontmatter_raw) or {}
+    except yaml.YAMLError:
+        return None
+
+    name = str(meta.get("name", "")).strip()
+    description = str(meta.get("description", "")).strip()
+    if not name:
+        return None
+
+    return {"name": name, "description": description, "body": body.strip()}
+
+
+def _discover_skills() -> dict:
+    """Scan SKILLS_DIR for skills/<name>/SKILL.md and return {name: skill}."""
+    skills: dict = {}
+    if not os.path.isdir(SKILLS_DIR):
+        return skills
+
+    for entry in sorted(os.listdir(SKILLS_DIR)):
+        skill_md = os.path.join(SKILLS_DIR, entry, "SKILL.md")
+        if not os.path.isfile(skill_md):
+            continue
+        parsed = _parse_skill_file(skill_md)
+        if parsed:
+            skills[parsed["name"]] = parsed
+    return skills
+
+
+# Load all available skills once at startup.
+SKILLS = _discover_skills()
+
+
+def _build_skill_catalog() -> str:
+    """Build the always-on catalog text listing each skill name + description."""
+    if not SKILLS:
+        return "No skills are currently available.\n"
+
+    lines = []
+    for skill in SKILLS.values():
+        # Collapse whitespace so multi-line YAML descriptions read as one line.
+        desc = " ".join(skill["description"].split())
+        lines.append(f"- {skill['name']}: {desc}")
+    return "\n".join(lines)
+
+
+# Small always-on base prompt (the general Role guidance only). The detailed
+# per-domain instructions are pulled in on demand via load_skill.
+BASE_SYSTEM_INSTRUCTION = (
     "You are a helpful AI assistant running on the user's laptop. "
     "You have access to tools that let you interact with the local system. "
     "Use the available tools whenever the user asks about system info, time, files, "
@@ -53,47 +137,59 @@ SYSTEM_INSTRUCTION = (
     "Answer clearly and concisely. "
     f"Your program is located at: {SCRIPT_DIR}\n\n"
 
-    # ── Audio / Playback ──
-    "For any headset or audio validation test, make sure system audio is not muted before and during playback checks. "
-    "When the user asks to play music or audio, use open_local_file to open the file from the 'test_assets/audio' subfolder inside the project root. "
-    "If no specific track is named, first call list_directory on the 'test_assets/audio' folder to discover available files, then open the first suitable one. "
-    "When running any audio playback related test item, if the user does not specify a playback duration, use 10 seconds as the default playback time. "
-    "For any audio-related test item, follow these steps in order:\n"
-    "  1) Play the file 'test_1k_tone.mp3' from the 'test_assets/audio' folder using open_local_file.\n"
-    "  2) While it is playing, capture a screenshot and analyze it for playback issues such as audio not playing or media player error codes.\n"
-    "  3) While it is still playing, use record_audio_output to record the headset audio output and save the recording inside the current test run folder.\n"
-    "  4) After recording finishes, stop the playback using close_media_player.\n"
-    "  5) Use analyze_audio_file on the recorded file to check audio quality (volume levels, clipping, silence, distortion).\n"
-    "  6) Include both the screenshot analysis and the audio quality analysis results in the test report.\n\n"
-
-    # ── Bluetooth ──
-    "When a test requires turning Bluetooth off and on, use set_bluetooth_radio_via_ui with turn_on=false then turn_on=true. "
-    "When a test requires disconnecting a Bluetooth device, use disconnect_bluetooth_via_ui with the device name. "
-    "When a test requires reconnecting a Bluetooth device, use reconnect_bluetooth_via_ui with the device name. "
-    "When a test requires checking Bluetooth connection status, use check_bluetooth_connection_status. "
-    "For Bluetooth 5 testing, always use ibterverify.exe located in the Utilities/ibterverify folder under the project root. "
-    "For Bluetooth I2S clock source checks, use hcitool.exe located at Utilities/hcitool/x64/hcitool.exe under the project root.\n\n"
-
-    # ── Arduino ──
-    "You can control an Arduino board connected via serial port to perform physical actions such as mouse clicking. "
-    "To use Arduino tools: first call arduino_board_check to find the board, then arduino_serial_connect to connect to its COM port, "
-    "then use arduino_mouse_click for an immediate mouse click or arduino_mouse_delay_click to click after a specified delay (in seconds).\n\n"
-
-    # ── File creation ──
-    "When creating files with content, use create_file with the content parameter, or use write_file with both file_path and content.\n\n"
-
-    # ── Report format ──
-    "When starting any test, first create a folder under the 'report' directory named report_YYYYMMDD_HHmmss (e.g. report_20260527_143000). "
-    "Save all test-related files, including logs, audio recordings, screenshots, and the final report, inside that test run folder. "
-    "The report filename must follow this exact pattern: report_YYYYMMDD_HHmmss (same format as the folder name). "
-    "The report content must always include exactly three parts in this order: Test Item, Test Result, Summary. "
-    "The report must also include Test Start Time and Test End Time. "
-    "If any error happens, the report must include Test Error Happened Time.\n\n"
-
-    # ── Scheduled tasks ──
-    "When running multi-step scheduled test flows, do not require a separate report-generation schedule. "
-    "After the last scheduled test task finishes, automatically generate one final summary report that consolidates all scheduled test results."
+    "## Skills\n"
+    "You have specialized skills available. Each skill contains detailed step-by-step "
+    "instructions for a domain. The full instructions are NOT loaded yet — only the "
+    "summaries below are. When the user's request matches a skill, FIRST call the "
+    "load_skill tool with that skill's name to load its full instructions, THEN follow "
+    "them. You may load multiple skills if a task spans several domains. Do not guess "
+    "the detailed steps — always load the relevant skill first.\n\n"
+    "Available skills:\n"
+    f"{_build_skill_catalog()}\n"
 )
+
+SYSTEM_INSTRUCTION = BASE_SYSTEM_INSTRUCTION
+
+
+def load_skill(name: str) -> dict:
+    """Tool: return the full instructions (body) for a named skill."""
+    skill = SKILLS.get(name)
+    if not skill:
+        available = ", ".join(SKILLS.keys()) or "(none)"
+        return {
+            "status": "error",
+            "error": f"Unknown skill '{name}'. Available skills: {available}",
+        }
+    return {
+        "status": "success",
+        "name": skill["name"],
+        "instructions": skill["body"],
+    }
+
+
+LOAD_SKILL_TOOL = {
+    "name": "load_skill",
+    "description": (
+        "Load the full detailed instructions for one of the available skills. "
+        "Call this BEFORE performing a task that matches a skill, using the exact "
+        "skill name from the 'Available skills' list. Returns the skill's full "
+        "step-by-step instructions."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "The exact skill name to load (e.g. 'bluetooth-validation').",
+            }
+        },
+        "required": ["name"],
+    },
+}
+
+# Register the skill loader alongside the existing tools.
+ALL_TOOLS = ALL_TOOLS + [LOAD_SKILL_TOOL]
+ALL_TOOL_FUNCTIONS["load_skill"] = load_skill
 
 TEST_PRECHECK_SYSTEM_INSTRUCTION = (
     "You are preparing a test execution precheck. "
@@ -111,6 +207,27 @@ TEST_PRECHECK_SYSTEM_INSTRUCTION = (
     "4) Ask for confirmation to start now (yes/no). "
     "The capability percentage should reflect the number of achievable steps (including equivalent methods) divided by total requested steps."
 )
+
+# ── Prompt caching ──────────────────────────────────────────────
+# The system prompt and tool schemas are large and identical on every request.
+# Marking them with cache_control lets the API reuse them at ~10% token cost on
+# cache hits, which is the single biggest saving for long iteration tests.
+#
+# The base system instruction is its own cached block so it is reused across BOTH
+# the precheck call and the main tool-use calls. The precheck appends a second,
+# uncached block for its extra guidance.
+SYSTEM_BASE_BLOCK = {
+    "type": "text",
+    "text": SYSTEM_INSTRUCTION,
+    "cache_control": {"type": "ephemeral"},
+}
+
+SYSTEM_BLOCKS = [SYSTEM_BASE_BLOCK]
+
+SYSTEM_BLOCKS_PRECHECK = [
+    SYSTEM_BASE_BLOCK,
+    {"type": "text", "text": TEST_PRECHECK_SYSTEM_INSTRUCTION},
+]
 
 
 def _is_test_request(user_text: str) -> bool:
@@ -170,15 +287,54 @@ def _extract_capability_percent(reply_text: str) -> int | None:
     return max(0, min(100, value))
 
 
-def _print_step_start(step_index: int, fn_name: str, fn_args: dict, step_callback: Callable[[str], None] | None = None) -> None:
+def _print_step_start(step_index: int, fn_name: str, fn_args: dict, cycle_index: int = 1, step_callback: Callable[[str], None] | None = None) -> None:
     """Print a clear step-start marker before each test/tool action."""
-    step_text = f"Step {step_index}: {fn_name} | args={json.dumps(fn_args, default=str)}"
+    if fn_name == "report_cycle_result":
+        cycle = fn_args.get("cycle_number", cycle_index)
+        result = fn_args.get("result", "").upper()
+        summary = fn_args.get("summary", "")
+        step_text = f"{'='*60}\n  CYCLE {cycle} COMPLETE — {result}\n  {summary}\n{'='*60}"
+    else:
+        step_text = f"Cycle {cycle_index} | Step {step_index}: {fn_name} | args={json.dumps(fn_args, default=str)}"
     print(step_text, flush=True)
     if step_callback:
         try:
             step_callback(step_text)
         except Exception:
             pass
+
+
+# ── Token usage tracking (disabled – enable only for token comparison) ─────
+# Accumulates token usage across all API calls so the cost of a run can be
+# compared (e.g. ai_agent.py vs ai_agent_skill.py) by sending the same prompt.
+# TOKEN_USAGE = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0}
+#
+#
+# def _track_usage(response, label: str = "") -> None:
+#     """Print this call's token usage and update the running session total."""
+#     usage = getattr(response, "usage", None)
+#     if usage is None:
+#         return
+#     inp = getattr(usage, "input_tokens", 0) or 0
+#     out = getattr(usage, "output_tokens", 0) or 0
+#     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+#     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+#
+#     TOKEN_USAGE["input"] += inp
+#     TOKEN_USAGE["output"] += out
+#     TOKEN_USAGE["cache_read"] += cache_read
+#     TOKEN_USAGE["cache_write"] += cache_write
+#     TOKEN_USAGE["requests"] += 1
+#
+#     total_in = TOKEN_USAGE["input"] + TOKEN_USAGE["cache_read"] + TOKEN_USAGE["cache_write"]
+#     print(
+#         f"  [TOKENS {label}] this call: input={inp} output={out} "
+#         f"cache_read={cache_read} cache_write={cache_write} | "
+#         f"session: requests={TOKEN_USAGE['requests']} "
+#         f"input(+cache)={total_in} output={TOKEN_USAGE['output']}",
+#         flush=True,
+#     )
+
 
 # ── Agent loop ──────────────────────────────────────────────────
 
@@ -241,9 +397,10 @@ def _run_agent_turn(
         precheck_response = client.messages.create(
             model=MODEL,
             max_tokens=1200,
-            system=f"{SYSTEM_INSTRUCTION} {TEST_PRECHECK_SYSTEM_INSTRUCTION}",
+            system=SYSTEM_BLOCKS_PRECHECK,
             messages=messages,
         )
+        # _track_usage(precheck_response, "precheck")
         precheck_reply = "".join(block.text for block in precheck_response.content if block.type == "text")
         messages.append({"role": "assistant", "content": precheck_response.content})
         capability_percent = _extract_capability_percent(precheck_reply)
@@ -261,13 +418,15 @@ def _run_agent_turn(
     response = client.messages.create(
         model=MODEL,
         max_tokens=4096,
-        system=SYSTEM_INSTRUCTION,
+        system=SYSTEM_BLOCKS,
         messages=messages,
         tools=ALL_TOOLS,
     )
+    # _track_usage(response, "main")
 
     # Handle tool calls in a loop
     tool_step_index = 0
+    cycle_index = 1
     while any(block.type == "tool_use" for block in response.content):
         assistant_content = response.content
         messages.append({"role": "assistant", "content": assistant_content})
@@ -280,7 +439,7 @@ def _run_agent_turn(
             fn_name = block.name
             fn_args = block.input if block.input else {}
             tool_step_index += 1
-            _print_step_start(tool_step_index, fn_name, fn_args, step_callback=step_callback)
+            _print_step_start(tool_step_index, fn_name, fn_args, cycle_index=cycle_index, step_callback=step_callback)
             if print_tool_logs:
                 print(f"  [Tool: {fn_name}({fn_args})]")
 
@@ -292,6 +451,11 @@ def _run_agent_turn(
                     result = {"error": f"Invalid arguments for {fn_name}: {e}"}
             else:
                 result = {"error": f"Unknown function: {fn_name}"}
+
+            # A completed cycle marker advances the cycle and restarts step numbering.
+            if fn_name == "report_cycle_result":
+                cycle_index += 1
+                tool_step_index = 0
 
             # If screenshot was captured, add image content for vision analysis
             if fn_name == "capture_screen" and isinstance(result, dict) and result.get("status") == "success":
@@ -317,10 +481,11 @@ def _run_agent_turn(
         response = client.messages.create(
             model=MODEL,
             max_tokens=4096,
-            system=SYSTEM_INSTRUCTION,
+            system=SYSTEM_BLOCKS,
             messages=messages,
             tools=ALL_TOOLS,
         )
+        # _track_usage(response, "main")
 
     reply = "".join(block.text for block in response.content if block.type == "text")
     messages.append({"role": "assistant", "content": response.content})
@@ -392,6 +557,7 @@ def run_agent():
     messages = []
     print("=== AI Agent (Anthropic) ===")
     print("Skills: time, system info, laptop info, list files, read files, run commands, screen capture, bluetooth scan & connect, headset endpoint check, task scheduling")
+    print(f"Loaded {len(SKILLS)} skill(s): {', '.join(SKILLS.keys()) or '(none)'}")
     print("Type 'quit' or 'exit' to stop.\n")
 
     while True:
@@ -399,6 +565,14 @@ def run_agent():
         if not user_input:
             continue
         if user_input.lower() in ("quit", "exit"):
+            # total_in = TOKEN_USAGE["input"] + TOKEN_USAGE["cache_read"] + TOKEN_USAGE["cache_write"]
+            # print(
+            #     f"\n=== TOKEN TOTAL (ai_agent.py) ===\n"
+            #     f"requests={TOKEN_USAGE['requests']} "
+            #     f"input(+cache)={total_in} output={TOKEN_USAGE['output']} "
+            #     f"(raw input={TOKEN_USAGE['input']} cache_read={TOKEN_USAGE['cache_read']} "
+            #     f"cache_write={TOKEN_USAGE['cache_write']})"
+            # )
             print("Goodbye!")
             break
 

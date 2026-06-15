@@ -8,7 +8,6 @@ from datetime import datetime
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-
 def get_current_time() -> dict:
     """Get the current date and time on this computer."""
     now = datetime.now()
@@ -17,6 +16,7 @@ def get_current_time() -> dict:
         "date": now.strftime("%Y-%m-%d"),
         "time": now.strftime("%H:%M:%S"),
         "day_of_week": now.strftime("%A"),
+        "timestamp": now.timestamp(),
     }
 
 def get_system_info() -> dict:
@@ -746,6 +746,28 @@ def cancel_scheduled_task(task_id: str) -> dict:
         return {"error": str(e)}
 
 
+def report_cycle_result(cycle_number: int, result: str, summary: str) -> dict:
+    """Report the result of one completed iteration cycle during a multi-iteration test.
+
+    Call this tool at the end of each iteration cycle so the user can see real-time
+    per-cycle feedback instead of a flat list of step numbers that grows indefinitely.
+
+    Args:
+        cycle_number: The 1-based cycle number that just finished.
+        result: Short outcome label, e.g. 'PASS', 'FAIL', or 'ERROR'.
+        summary: A 1-2 sentence description of what happened in this cycle.
+
+    Returns:
+        Acknowledgement dict so the agent can continue to the next cycle.
+    """
+    return {
+        "status": "acknowledged",
+        "cycle_number": cycle_number,
+        "result": result,
+        "summary": summary,
+    }
+
+
 # Map of function name -> callable
 TOOL_FUNCTIONS = {
     "get_current_time": get_current_time,
@@ -767,6 +789,7 @@ TOOL_FUNCTIONS = {
     "schedule_task_in_minutes": schedule_task_in_minutes,
     "list_scheduled_tasks": list_scheduled_tasks,
     "cancel_scheduled_task": cancel_scheduled_task,
+    "report_cycle_result": report_cycle_result,
 }
 
 TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, open_website, open_local_file, close_local_file_process, close_media_player, schedule_task_in_minutes, list_scheduled_tasks, cancel_scheduled_task]
@@ -775,7 +798,7 @@ TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run
 ANTHROPIC_TOOLS = [
     {
         "name": "get_current_time",
-        "description": "Get the current date and time on this computer.",
+        "description": "Get the current date and time on this computer. Returns a human-readable 'datetime' string plus an epoch 'timestamp' (float). Use the 'timestamp' value when a tool requires an epoch start_time (e.g. copy_wrt_log_to_file).",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -972,6 +995,33 @@ ANTHROPIC_TOOLS = [
             "required": ["task_id"],
         },
     },
+    {
+        "name": "report_cycle_result",
+        "description": (
+            "Call this tool at the end of EVERY iteration cycle during a multi-iteration test. "
+            "It emits a clear cycle-complete marker so the user can track progress in real time "
+            "and distinguish where one cycle ends and the next begins. "
+            "Always call this before starting the next cycle."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "cycle_number": {
+                    "type": "integer",
+                    "description": "The 1-based number of the cycle that just finished.",
+                },
+                "result": {
+                    "type": "string",
+                    "description": "Cycle outcome: 'PASS', 'FAIL', or 'ERROR'.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "A brief 1-2 sentence description of what happened in this cycle.",
+                },
+            },
+            "required": ["cycle_number", "result", "summary"],
+        },
+    },
 ]
 
 # OpenAI-compatible tool definitions (JSON schema format)
@@ -980,7 +1030,7 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_current_time",
-            "description": "Get the current date and time on this computer.",
+            "description": "Get the current date and time on this computer. Returns a human-readable 'datetime' string plus an epoch 'timestamp' (float). Use the 'timestamp' value when a tool requires an epoch start_time (e.g. copy_wrt_log_to_file).",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
