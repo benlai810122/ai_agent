@@ -1,0 +1,5 @@
+anthropic
+flask
+httpx
+pyserial
+pyyaml

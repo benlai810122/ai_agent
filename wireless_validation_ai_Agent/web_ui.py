@@ -1,3 +1,4 @@
+import sys
 from flask import Flask, render_template, request, jsonify
 from ai_agent import _run_agent_turn
 import threading
@@ -8,8 +9,24 @@ from datetime import datetime
 
 
 MAX_UPLOAD_CHARS = 50000
-                                                                                                                                                      
-app = Flask(__name__)
+
+# When frozen by PyInstaller, data files are in sys._MEIPASS (the temp extraction
+# folder for --onefile, or the _internal/ folder for --onedir).
+# The exe itself lives in os.path.dirname(sys.executable).
+if getattr(sys, 'frozen', False):
+    # _MEIPASS is where PyInstaller unpacks bundled data files at runtime
+    _BASE_DIR = sys._MEIPASS
+    # Runtime writable data (reports, etc.) should live next to the exe, not in _MEIPASS
+    _RUNTIME_DIR = os.path.dirname(sys.executable)
+else:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    _RUNTIME_DIR = _BASE_DIR
+
+app = Flask(
+    __name__,
+    template_folder=os.path.join(_BASE_DIR, 'templates'),
+    static_folder=os.path.join(_BASE_DIR, 'static'),
+)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
@@ -18,7 +35,7 @@ messages = []
 lock = threading.Lock()
 request_states = {}
 request_states_lock = threading.Lock()
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report", "web_ui_run_history.json")
+HISTORY_FILE = os.path.join(_RUNTIME_DIR, "report", "web_ui_run_history.json")
 MAX_HISTORY_ITEMS = 100
 
 

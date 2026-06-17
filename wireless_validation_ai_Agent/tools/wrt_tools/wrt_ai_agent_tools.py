@@ -1,3 +1,4 @@
+import sys
 import subprocess
 import shutil
 import os
@@ -7,7 +8,10 @@ from pathlib import Path
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
+if getattr(sys, 'frozen', False):
+    PROJECT_ROOT = sys._MEIPASS
+else:
+    PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 
 CDE_EXE = r"C:\Program Files\Intel\WRT2\cde.exe"
 WRT_LOG_ROOT = r"C:\OSData\SystemData\Temp\WRT2G\Log"

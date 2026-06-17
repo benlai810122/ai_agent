@@ -1,3 +1,4 @@
+import sys
 import yaml
 import os
 import json
@@ -17,10 +18,18 @@ from tools.mouse_keyboard_tools.mouse_ai_Agent_tools import MOUSE_KEYBOARD_ANTHR
 from tools.regular_tools.power_state_ai_agent_tools import POWER_STATE_ANTHROPIC_TOOLS, POWER_STATE_TOOL_FUNCTIONS
 from tools.driver_install_tools.isst_driver_install_ai_agent_tools import ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS, ISST_DRIVER_INSTALL_TOOL_FUNCTIONS
 from tools.wrt_tools.wrt_ai_agent_tools import WRT_ANTHROPIC_TOOLS, WRT_TOOL_FUNCTIONS
+from tools.dexarm_tools.dexarm_ai_agent_tools import DEXARM_ANTHROPIC_TOOLS, DEXARM_TOOL_FUNCTIONS
 from anthropic import Anthropic
 
+# When frozen by PyInstaller, bundled data files live in sys._MEIPASS.
+# The exe itself is in os.path.dirname(sys.executable).
+if getattr(sys, 'frozen', False):
+    SCRIPT_DIR = sys._MEIPASS
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Load API key from YAML config
-config_path = os.path.join(os.path.dirname(__file__), "open_ai_key.yaml")
+config_path = os.path.join(SCRIPT_DIR, "open_ai_key.yaml")
 with open(config_path, "r") as f:
     config = yaml.safe_load(f)
 
@@ -32,12 +41,11 @@ http_client = httpx.Client(verify=False)
 client = Anthropic(base_url=base_url, auth_token=auth_token, http_client=http_client)
 
 # Merge all tools
-ALL_TOOLS = ANTHROPIC_TOOLS + BLUETOOTH_ANTHROPIC_TOOLS + HEADSET_ANTHROPIC_TOOLS + IBTERVERIFY_ANTHROPIC_TOOLS + HCITOOL_ANTHROPIC_TOOLS + ARDUINO_ANTHROPIC_TOOLS + MOUSE_KEYBOARD_ANTHROPIC_TOOLS + POWER_STATE_ANTHROPIC_TOOLS + ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS + WRT_ANTHROPIC_TOOLS
-ALL_TOOL_FUNCTIONS = {**TOOL_FUNCTIONS, **BLUETOOTH_TOOL_FUNCTIONS, **HEADSET_TOOL_FUNCTIONS, **IBTERVERIFY_TOOL_FUNCTIONS, **HCITOOL_TOOL_FUNCTIONS, **ARDUINO_TOOL_FUNCTIONS, **MOUSE_KEYBOARD_TOOL_FUNCTIONS, **POWER_STATE_TOOL_FUNCTIONS, **ISST_DRIVER_INSTALL_TOOL_FUNCTIONS, **WRT_TOOL_FUNCTIONS}
+ALL_TOOLS = ANTHROPIC_TOOLS + BLUETOOTH_ANTHROPIC_TOOLS + HEADSET_ANTHROPIC_TOOLS + IBTERVERIFY_ANTHROPIC_TOOLS + HCITOOL_ANTHROPIC_TOOLS + ARDUINO_ANTHROPIC_TOOLS + MOUSE_KEYBOARD_ANTHROPIC_TOOLS + POWER_STATE_ANTHROPIC_TOOLS + ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS + WRT_ANTHROPIC_TOOLS + DEXARM_ANTHROPIC_TOOLS
+ALL_TOOL_FUNCTIONS = {**TOOL_FUNCTIONS, **BLUETOOTH_TOOL_FUNCTIONS, **HEADSET_TOOL_FUNCTIONS, **IBTERVERIFY_TOOL_FUNCTIONS, **HCITOOL_TOOL_FUNCTIONS, **ARDUINO_TOOL_FUNCTIONS, **MOUSE_KEYBOARD_TOOL_FUNCTIONS, **POWER_STATE_TOOL_FUNCTIONS, **ISST_DRIVER_INSTALL_TOOL_FUNCTIONS, **WRT_TOOL_FUNCTIONS, **DEXARM_TOOL_FUNCTIONS}
 
 MODEL = "claude-4-5-sonnet"
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEDULED_MESSAGES = []
 SCHEDULED_MESSAGES_LOCK = threading.Lock()
 LAST_AUTO_SUMMARY_EXECUTED_COUNT = 0

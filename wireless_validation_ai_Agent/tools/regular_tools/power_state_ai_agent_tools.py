@@ -1,9 +1,13 @@
+import sys
 import subprocess
 import os
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
+if getattr(sys, 'frozen', False):
+    PROJECT_ROOT = sys._MEIPASS
+else:
+    PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 PWRTEST_EXE = os.path.join(PROJECT_ROOT, "Utilities", "pwrtest", "pwrtest.exe")
 
 
