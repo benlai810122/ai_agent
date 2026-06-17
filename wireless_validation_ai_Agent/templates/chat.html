@@ -380,7 +380,9 @@ $(function() {
         });
     });
 
-    $('#timeline-refresh').on('click', function() {
+    $(document).on('click', '#timeline-refresh', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
         loadHistory();
     });
 
