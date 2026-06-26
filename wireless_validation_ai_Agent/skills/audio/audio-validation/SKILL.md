@@ -1,12 +1,12 @@
 ---
-name: audio-playback
+name: audio-validation
 description: >
   Use for headset/audio validation: playing a tone, capturing a screenshot of the
   player, recording headset output, and analyzing audio quality. Covers any test
   that plays music or audio.
 ---
 
-# Audio Playback Validation
+# Audio Validation Skill
 
 Make sure system audio is NOT muted before and during playback checks.
 

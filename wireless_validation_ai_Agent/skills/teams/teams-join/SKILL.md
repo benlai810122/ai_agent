@@ -1,27 +1,23 @@
 ---
-name: teams-control
+name: teams-join
 description: >
-  Use when a task involves Microsoft Teams call operations: joining a meeting by URL,
-  checking call status, muting/unmuting microphone, toggling camera, and leaving a call.
-  Includes guidance for interpreting vision-click outputs and Teams call-state signals.
+  Use when a task requires joining or leaving a Microsoft Teams meeting.
+  Includes guidance for interpreting status and confirming call state.
 ---
 
-# Microsoft Teams Call Control
+# Microsoft Teams Join and Leave
 
 ## Scope
-This skill controls Teams call actions through the available Teams tools:
+This skill is limited to joining or leaving a Teams meeting and confirming status using:
 - `join_teams_meeting`
 - `check_teams_call_status`
-- `mute_teams_microphone`
-- `unmute_teams_microphone`
-- `toggle_teams_camera`
 - `leave_teams_call`
 
 ## Core Rules
 1. For joining, always call `join_teams_meeting(meeting_url=...)` with a full Teams URL.
-2. After joining or leaving, always verify state with `check_teams_call_status`.
-3. Keep actions explicit and sequential: join -> verify -> control -> verify -> leave.
-4. If a call-state result is unclear, run `check_teams_call_status` again after 2-3 seconds.
+2. After joining or leaving, verify state with `check_teams_call_status`.
+3. Keep actions explicit and sequential: join -> verify -> leave -> verify.
+4. If call-state is unclear, run `check_teams_call_status` again after 2-3 seconds.
 
 ## Join Flow
 1. Call `join_teams_meeting(meeting_url=<teams_link>)`.
@@ -42,34 +38,16 @@ Interpretation:
 - `teams_running=true` + `call_active=false`: not in an active call (or state not detected yet).
 - `teams_running=false`: Teams is closed/not running.
 
-## In-call Controls
-### Mute microphone
-Call `mute_teams_microphone`.
-- Sends `Ctrl+Shift+M` to Teams.
+## Recommended Sequence
+1. `join_teams_meeting(meeting_url=...)`
+2. `check_teams_call_status`
+3. `leave_teams_call`
+4. `check_teams_call_status`
 
-### Unmute microphone
-Call `unmute_teams_microphone`.
-- Sends `Ctrl+Shift+M` to Teams.
-
-### Toggle camera
-Call `toggle_teams_camera`.
-- Sends `Ctrl+Shift+O`.
-- Call again to switch back.
-
-## Leave Call
+## Leave Flow
 1. Call `leave_teams_call`.
 2. Wait 2-3 seconds.
 3. Call `check_teams_call_status` and confirm `call_active=false`.
-
-## Recommended End-to-end Sequence
-1. `join_teams_meeting(meeting_url=...)`
-2. `check_teams_call_status`
-3. `mute_teams_microphone`
-4. `unmute_teams_microphone`
-5. `toggle_teams_camera`
-6. `toggle_teams_camera`
-7. `leave_teams_call`
-8. `check_teams_call_status`
 
 ## Failure Handling
 If `join_teams_meeting` returns an error:
@@ -77,12 +55,16 @@ If `join_teams_meeting` returns an error:
 2. Retry once after a short delay.
 3. If still failing, run `check_teams_call_status` to capture current Teams state.
 
+If `leave_teams_call` returns an error:
+1. Re-run `check_teams_call_status` to verify if call already ended.
+2. Retry leave once after a short delay.
+
 If `check_teams_call_status` is uncertain:
 1. Wait 2-3 seconds.
 2. Re-run status check.
 3. Use returned `signals` for debugging window-title based detection.
 
 ## Safety and Consistency
-- Do not chain multiple hotkey actions without short delays between them.
-- Always verify final state after join and leave.
+- Do not assume join success without status verification.
+- Always verify final state after both join and leave.
 - Prefer tool results over assumptions when reporting success/failure.

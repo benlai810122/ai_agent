@@ -1,14 +1,14 @@
 ---
-name: arduino-control
+name: arduino-mouse-click
 description: >
-  Use to control an Arduino board over serial to perform physical actions such as
-  mouse clicking (immediate or delayed).
+  Use to trigger Arduino-based mouse click actions over serial, including
+  immediate click and delayed click flows.
 ---
 
-# Arduino Control
+# Arduino Mouse Click Skill
 
-You can control an Arduino board connected via serial port to perform physical
-actions such as mouse clicking.
+This skill controls an Arduino board connected via serial port to perform
+mouse click actions.
 
 ## Steps
 1. Call `arduino_board_check` to find the board.
