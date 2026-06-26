@@ -46,7 +46,6 @@ def add_no_cache_headers(response):
     response.headers["Expires"] = "0"
     return response
 
-
 def _ensure_history_dir() -> None:
     os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
 

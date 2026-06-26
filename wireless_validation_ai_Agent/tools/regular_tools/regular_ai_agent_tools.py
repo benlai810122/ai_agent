@@ -579,172 +579,59 @@ def close_media_player(force: bool = False) -> dict:
         return {"error": str(e)}
 
 
-# ── Task scheduling ────────────────────────────────────────────
+# ── Task scheduling (disabled) ────────────────────────────────────────────
+# import threading
+# import uuid
+# 
+# # Global task registry (disabled)
+# # _SCHEDULED_TASKS = {}
+# # _TASK_LOCK = threading.Lock()
+# # _SCHEDULER_NOTIFIER = None
+
+# Still needed for open_local_file:
 import threading
 import uuid
-
-# Global task registry
-_SCHEDULED_TASKS = {}
-_TASK_LOCK = threading.Lock()
-_SCHEDULER_NOTIFIER = None
 _OPENED_LOCAL_PROCESSES = {}
 _OPENED_LOCAL_LOCK = threading.Lock()
 
 
-def set_scheduler_notifier(callback) -> dict:
-    """Register a callback that will be called when a scheduled task executes."""
-    global _SCHEDULER_NOTIFIER
-    try:
-        if callback is not None and not callable(callback):
-            return {"error": "callback must be callable or None."}
-        _SCHEDULER_NOTIFIER = callback
-        return {"status": "success"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def _public_task_view(task: dict) -> dict:
-    """Return a JSON-safe copy of a task without runtime-only objects."""
-    return {
-        "task_id": task.get("task_id"),
-        "description": task.get("description"),
-        "status": task.get("status"),
-        "scheduled_at": task.get("scheduled_at"),
-        "execute_at": task.get("execute_at"),
-        "delay_minutes": task.get("delay_minutes"),
-        "executed_at": task.get("executed_at"),
-        "cancelled_at": task.get("cancelled_at"),
-    }
-
-
-def schedule_task_in_minutes(task_description: str, delay_minutes: int) -> dict:
-    """Schedule a task to be executed after a specified delay in minutes. Returns a task ID that can be used to track or cancel it."""
-    try:
-        if not task_description or not task_description.strip():
-            return {"error": "task_description is required."}
-
-        delay_minutes = int(delay_minutes)
-        if delay_minutes < 1:
-            return {"error": "delay_minutes must be at least 1 minute."}
-
-        task_id = str(uuid.uuid4())[:8]
-        scheduled_time = datetime.now()
-        execute_time = scheduled_time
-        delay_seconds = delay_minutes * 60
-
-        # Create callback that updates task state and prints a visible reminder in terminal.
-        def execute_task():
-            task_for_notify = None
-            with _TASK_LOCK:
-                task = _SCHEDULED_TASKS.get(task_id)
-                if not task or task.get("status") != "scheduled":
-                    return
-                task["status"] = "executed"
-                task["executed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                task_for_notify = _public_task_view(task)
-
-            # If agent registered a notifier, let it format a user-visible response.
-            if _SCHEDULER_NOTIFIER and task_for_notify:
-                try:
-                    _SCHEDULER_NOTIFIER(task_for_notify)
-                    return
-                except Exception:
-                    pass
-
-            # Fallback reminder while the agent is waiting for user input.
-            print(
-                f"\n[SCHEDULED REMINDER] {task_description} (task_id={task_id}, time={datetime.now().strftime('%Y-%m-%d %H:%M:%S')})",
-                flush=True,
-            )
-
-        # Store task info
-        execute_at_text = datetime.fromtimestamp(execute_time.timestamp() + delay_seconds).strftime("%Y-%m-%d %H:%M:%S")
-        with _TASK_LOCK:
-            _SCHEDULED_TASKS[task_id] = {
-                "task_id": task_id,
-                "description": task_description.strip(),
-                "status": "scheduled",
-                "scheduled_at": scheduled_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "execute_at": execute_at_text,
-                "delay_minutes": delay_minutes,
-                "executed_at": None,
-                "cancelled_at": None,
-                "_timer": None,
-            }
-
-        # Schedule the timer thread
-        timer = threading.Timer(delay_seconds, execute_task)
-        timer.daemon = True
-        with _TASK_LOCK:
-            if task_id in _SCHEDULED_TASKS:
-                _SCHEDULED_TASKS[task_id]["_timer"] = timer
-        timer.start()
-
-        return {
-            "status": "scheduled",
-            "task_id": task_id,
-            "description": task_description.strip(),
-            "delay_minutes": delay_minutes,
-            "scheduled_at": scheduled_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "execute_at": execute_at_text,
-            "message": f"Task '{task_description}' scheduled to run in {delay_minutes} minute(s). Task ID: {task_id}",
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def list_scheduled_tasks() -> dict:
-    """List all scheduled and executed tasks."""
-    try:
-        with _TASK_LOCK:
-            tasks = [_public_task_view(t) for t in _SCHEDULED_TASKS.values()]
-
-        scheduled = [t for t in tasks if t["status"] == "scheduled"]
-        executed = [t for t in tasks if t["status"] == "executed"]
-        cancelled = [t for t in tasks if t["status"] == "cancelled"]
-
-        return {
-            "status": "success",
-            "total_tasks": len(tasks),
-            "pending_count": len(scheduled),
-            "executed_count": len(executed),
-            "cancelled_count": len(cancelled),
-            "pending_tasks": scheduled,
-            "executed_tasks": executed,
-            "cancelled_tasks": cancelled,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def cancel_scheduled_task(task_id: str) -> dict:
-    """Cancel a scheduled task before it executes."""
-    try:
-        with _TASK_LOCK:
-            if task_id not in _SCHEDULED_TASKS:
-                return {"error": f"Task ID '{task_id}' not found."}
-
-            task = _SCHEDULED_TASKS[task_id]
-            if task["status"] != "scheduled":
-                return {
-                    "status": "error",
-                    "message": f"Cannot cancel task '{task_id}'. Current status: {task['status']}.",
-                }
-
-            timer = task.get("_timer")
-            if timer:
-                timer.cancel()
-            task["status"] = "cancelled"
-            task["cancelled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        return {
-            "status": "success",
-            "task_id": task_id,
-            "message": f"Task '{task_id}' has been cancelled.",
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
+# def set_scheduler_notifier(callback) -> dict:
+#     """Register a callback that will be called when a scheduled task executes."""
+#     global _SCHEDULER_NOTIFIER
+#     try:
+#         if callback is not None and not callable(callback):
+#             return {"error": "callback must be callable or None."}
+#         _SCHEDULER_NOTIFIER = callback
+#         return {"status": "success"}
+#     except Exception as e:
+#         return {"error": str(e)}
+#
+#
+# def _public_task_view(task: dict) -> dict:
+#     """Return a JSON-safe copy of a task without runtime-only objects."""
+#     return {
+#         "task_id": task.get("task_id"),
+#         "description": task.get("description"),
+#         "status": task.get("status"),
+#         "scheduled_at": task.get("scheduled_at"),
+#         "execute_at": task.get("execute_at"),
+#         "delay_minutes": task.get("delay_minutes"),
+#         "executed_at": task.get("executed_at"),
+#         "cancelled_at": task.get("cancelled_at"),
+#     }
+#
+#
+#
+# Task scheduling functions (commented out - feature disabled):
+# def schedule_task_in_minutes(task_description: str, delay_minutes: int) -> dict:
+#     pass
+#
+# def list_scheduled_tasks() -> dict:
+#     pass
+#
+# def cancel_scheduled_task(task_id: str) -> dict:
+#     pass
+#
 
 def report_cycle_result(cycle_number: int, result: str, summary: str) -> dict:
     """Report the result of one completed iteration cycle during a multi-iteration test.
@@ -786,13 +673,13 @@ TOOL_FUNCTIONS = {
     "open_local_file": open_local_file,
     "close_local_file_process": close_local_file_process,
     "close_media_player": close_media_player,
-    "schedule_task_in_minutes": schedule_task_in_minutes,
-    "list_scheduled_tasks": list_scheduled_tasks,
-    "cancel_scheduled_task": cancel_scheduled_task,
+    # "schedule_task_in_minutes": schedule_task_in_minutes,
+    # "list_scheduled_tasks": list_scheduled_tasks,
+    # "cancel_scheduled_task": cancel_scheduled_task,
     "report_cycle_result": report_cycle_result,
 }
 
-TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, open_website, open_local_file, close_local_file_process, close_media_player, schedule_task_in_minutes, list_scheduled_tasks, cancel_scheduled_task]
+TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, open_website, open_local_file, close_local_file_process, close_media_player]
 
 # Anthropic-compatible tool definitions
 ANTHROPIC_TOOLS = [
@@ -967,34 +854,34 @@ ANTHROPIC_TOOLS = [
             "required": [],
         },
     },
-    {
-        "name": "schedule_task_in_minutes",
-        "description": "Schedule a task to be executed after a specified delay in minutes. Returns a task ID.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_description": {"type": "string", "description": "A description of the task to schedule."},
-                "delay_minutes": {"type": "integer", "description": "Number of minutes to wait before executing. Must be at least 1."}
-            },
-            "required": ["task_description", "delay_minutes"],
-        },
-    },
-    {
-        "name": "list_scheduled_tasks",
-        "description": "List all scheduled and executed tasks with their status and timing info.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "cancel_scheduled_task",
-        "description": "Cancel a scheduled task before it executes using its task ID.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The ID of the scheduled task to cancel."}
-            },
-            "required": ["task_id"],
-        },
-    },
+    # {
+    #     "name": "schedule_task_in_minutes",
+    #     "description": "Schedule a task to be executed after a specified delay in minutes. Returns a task ID.",
+    #     "input_schema": {
+    #         "type": "object",
+    #         "properties": {
+    #             "task_description": {"type": "string", "description": "A description of the task to schedule."},
+    #             "delay_minutes": {"type": "integer", "description": "Number of minutes to wait before executing. Must be at least 1."}
+    #         },
+    #         "required": ["task_description", "delay_minutes"],
+    #     },
+    # },
+    # {
+    #     "name": "list_scheduled_tasks",
+    #     "description": "List all scheduled and executed tasks with their status and timing info.",
+    #     "input_schema": {"type": "object", "properties": {}, "required": []},
+    # },
+    # {
+    #     "name": "cancel_scheduled_task",
+    #     "description": "Cancel a scheduled task before it executes using its task ID.",
+    #     "input_schema": {
+    #         "type": "object",
+    #         "properties": {
+    #             "task_id": {"type": "string", "description": "The ID of the scheduled task to cancel."}
+    #         },
+    #         "required": ["task_id"],
+    #     },
+    # },
     {
         "name": "report_cycle_result",
         "description": (
@@ -1245,41 +1132,41 @@ OPENAI_TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "schedule_task_in_minutes",
-            "description": "Schedule a task to be executed after a specified delay in minutes. Returns a task ID.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_description": {"type": "string", "description": "A description of the task to schedule."},
-                    "delay_minutes": {"type": "integer", "description": "Number of minutes to wait before executing. Must be at least 1."}
-                },
-                "required": ["task_description", "delay_minutes"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_scheduled_tasks",
-            "description": "List all scheduled and executed tasks with their status and timing info.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "cancel_scheduled_task",
-            "description": "Cancel a scheduled task before it executes using its task ID.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string", "description": "The ID of the scheduled task to cancel."}
-                },
-                "required": ["task_id"],
-            },
-        },
-    },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "schedule_task_in_minutes",
+    #         "description": "Schedule a task to be executed after a specified delay in minutes. Returns a task ID.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "task_description": {"type": "string", "description": "A description of the task to schedule."},
+    #                 "delay_minutes": {"type": "integer", "description": "Number of minutes to wait before executing. Must be at least 1."}
+    #             },
+    #             "required": ["task_description", "delay_minutes"],
+    #         },
+    #     },
+    # },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "list_scheduled_tasks",
+    #         "description": "List all scheduled and executed tasks with their status and timing info.",
+    #         "parameters": {"type": "object", "properties": {}, "required": []},
+    #     },
+    # },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "cancel_scheduled_task",
+    #         "description": "Cancel a scheduled task before it executes using its task ID.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "task_id": {"type": "string", "description": "The ID of the scheduled task to cancel."}
+    #             },
+    #             "required": ["task_id"],
+    #         },
+    #     },
+    # },
 ]

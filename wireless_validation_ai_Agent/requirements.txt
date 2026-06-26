@@ -6,3 +6,5 @@ pyyaml
 pyautogui
 pygetwindow
 uiautomation
+pynput
+psutil

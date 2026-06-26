@@ -8,23 +8,58 @@ import re
 from typing import Callable
 from datetime import datetime
 import httpx
-from tools.regular_tools.regular_ai_agent_tools import ANTHROPIC_TOOLS, TOOL_FUNCTIONS, set_scheduler_notifier, list_scheduled_tasks
-from tools.bluetooth_tools.bluetooth_ai_agent_tools import BLUETOOTH_ANTHROPIC_TOOLS, BLUETOOTH_TOOL_FUNCTIONS
-from tools.audio_headset_tools.headset_ai_agent_tools import HEADSET_ANTHROPIC_TOOLS, HEADSET_TOOL_FUNCTIONS
-from tools.bluetooth_tools.bluetooth_ws_ibterverify_tools import IBTERVERIFY_ANTHROPIC_TOOLS, IBTERVERIFY_TOOL_FUNCTIONS
-from tools.bluetooth_tools.bluetooth_ws_hci_tools import HCITOOL_ANTHROPIC_TOOLS, HCITOOL_TOOL_FUNCTIONS
-from tools.arduino_tools.arduino_ai_agent_tools import ARDUINO_ANTHROPIC_TOOLS, ARDUINO_TOOL_FUNCTIONS
-from tools.mouse_keyboard_tools.mouse_ai_Agent_tools import MOUSE_KEYBOARD_ANTHROPIC_TOOLS, MOUSE_KEYBOARD_TOOL_FUNCTIONS
-from tools.regular_tools.power_state_ai_agent_tools import POWER_STATE_ANTHROPIC_TOOLS, POWER_STATE_TOOL_FUNCTIONS
-from tools.driver_install_tools.isst_driver_install_ai_agent_tools import ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS, ISST_DRIVER_INSTALL_TOOL_FUNCTIONS
+from tools.regular_tools.regular_ai_agent_tools import (
+    ANTHROPIC_TOOLS,
+    TOOL_FUNCTIONS,
+)
+from tools.bluetooth_tools.bluetooth_ai_agent_tools import (
+    BLUETOOTH_ANTHROPIC_TOOLS,
+    BLUETOOTH_TOOL_FUNCTIONS,
+)
+from tools.audio_headset_tools.headset_ai_agent_tools import (
+    HEADSET_ANTHROPIC_TOOLS,
+    HEADSET_TOOL_FUNCTIONS,
+)
+from tools.bluetooth_tools.bluetooth_ws_ibterverify_tools import (
+    IBTERVERIFY_ANTHROPIC_TOOLS,
+    IBTERVERIFY_TOOL_FUNCTIONS,
+)
+from tools.bluetooth_tools.bluetooth_ws_hci_tools import (
+    HCITOOL_ANTHROPIC_TOOLS,
+    HCITOOL_TOOL_FUNCTIONS,
+)
+from tools.arduino_tools.arduino_ai_agent_tools import (
+    ARDUINO_ANTHROPIC_TOOLS,
+    ARDUINO_TOOL_FUNCTIONS,
+)
+from tools.mouse_keyboard_tools.mouse_ai_Agent_tools import (
+    MOUSE_KEYBOARD_ANTHROPIC_TOOLS,
+    MOUSE_KEYBOARD_TOOL_FUNCTIONS,
+)
+from tools.regular_tools.power_state_ai_agent_tools import (
+    POWER_STATE_ANTHROPIC_TOOLS,
+    POWER_STATE_TOOL_FUNCTIONS,
+    _load_task_state,
+    _save_task_state,
+)
+from tools.driver_install_tools.isst_driver_install_ai_agent_tools import (
+    ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS,
+    ISST_DRIVER_INSTALL_TOOL_FUNCTIONS,
+)
 from tools.wrt_tools.wrt_ai_agent_tools import WRT_ANTHROPIC_TOOLS, WRT_TOOL_FUNCTIONS
-from tools.dexarm_tools.dexarm_ai_agent_tools import DEXARM_ANTHROPIC_TOOLS, DEXARM_TOOL_FUNCTIONS
-from tools.teams_tools.teams_ai_agent_tools import TEAMS_ANTHROPIC_TOOLS, TEAMS_TOOL_FUNCTIONS
+from tools.dexarm_tools.dexarm_ai_agent_tools import (
+    DEXARM_ANTHROPIC_TOOLS,
+    DEXARM_TOOL_FUNCTIONS,
+)
+from tools.teams_tools.teams_ai_agent_tools import (
+    TEAMS_ANTHROPIC_TOOLS,
+    TEAMS_TOOL_FUNCTIONS,
+)
 from anthropic import Anthropic
 
 # When frozen by PyInstaller, bundled data files live in sys._MEIPASS.
 # The exe itself is in os.path.dirname(sys.executable).
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
     SCRIPT_DIR = sys._MEIPASS
 else:
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -34,23 +69,48 @@ config_path = os.path.join(SCRIPT_DIR, "open_ai_key.yaml")
 with open(config_path, "r") as f:
     config = yaml.safe_load(f)
 
-base_url = 'https://gnai.intel.com/api/providers/anthropic'
-auth_token = config['gnai_token']
+base_url = "https://gnai.intel.com/api/providers/anthropic"
+auth_token = config["gnai_token"]
 
 # Initialize the Anthropic client (skip SSL verify for Intel internal proxy)
 http_client = httpx.Client(verify=False)
 client = Anthropic(base_url=base_url, auth_token=auth_token, http_client=http_client)
 
 # Merge all tools
-ALL_TOOLS = ANTHROPIC_TOOLS + BLUETOOTH_ANTHROPIC_TOOLS + HEADSET_ANTHROPIC_TOOLS + IBTERVERIFY_ANTHROPIC_TOOLS + HCITOOL_ANTHROPIC_TOOLS + ARDUINO_ANTHROPIC_TOOLS + MOUSE_KEYBOARD_ANTHROPIC_TOOLS + POWER_STATE_ANTHROPIC_TOOLS + ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS + WRT_ANTHROPIC_TOOLS + DEXARM_ANTHROPIC_TOOLS + TEAMS_ANTHROPIC_TOOLS
-ALL_TOOL_FUNCTIONS = {**TOOL_FUNCTIONS, **BLUETOOTH_TOOL_FUNCTIONS, **HEADSET_TOOL_FUNCTIONS, **IBTERVERIFY_TOOL_FUNCTIONS, **HCITOOL_TOOL_FUNCTIONS, **ARDUINO_TOOL_FUNCTIONS, **MOUSE_KEYBOARD_TOOL_FUNCTIONS, **POWER_STATE_TOOL_FUNCTIONS, **ISST_DRIVER_INSTALL_TOOL_FUNCTIONS, **WRT_TOOL_FUNCTIONS, **DEXARM_TOOL_FUNCTIONS, **TEAMS_TOOL_FUNCTIONS}
+ALL_TOOLS = (
+    ANTHROPIC_TOOLS
+    + BLUETOOTH_ANTHROPIC_TOOLS
+    + HEADSET_ANTHROPIC_TOOLS
+    + IBTERVERIFY_ANTHROPIC_TOOLS
+    + HCITOOL_ANTHROPIC_TOOLS
+    + ARDUINO_ANTHROPIC_TOOLS
+    + MOUSE_KEYBOARD_ANTHROPIC_TOOLS
+    + POWER_STATE_ANTHROPIC_TOOLS
+    + ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS
+    + WRT_ANTHROPIC_TOOLS
+    + DEXARM_ANTHROPIC_TOOLS
+    + TEAMS_ANTHROPIC_TOOLS
+)
+ALL_TOOL_FUNCTIONS = {
+    **TOOL_FUNCTIONS,
+    **BLUETOOTH_TOOL_FUNCTIONS,
+    **HEADSET_TOOL_FUNCTIONS,
+    **IBTERVERIFY_TOOL_FUNCTIONS,
+    **HCITOOL_TOOL_FUNCTIONS,
+    **ARDUINO_TOOL_FUNCTIONS,
+    **MOUSE_KEYBOARD_TOOL_FUNCTIONS,
+    **POWER_STATE_TOOL_FUNCTIONS,
+    **ISST_DRIVER_INSTALL_TOOL_FUNCTIONS,
+    **WRT_TOOL_FUNCTIONS,
+    **DEXARM_TOOL_FUNCTIONS,
+    **TEAMS_TOOL_FUNCTIONS,
+}
 
 MODEL = "claude-4-5-sonnet"
 
-SCHEDULED_MESSAGES = []
-SCHEDULED_MESSAGES_LOCK = threading.Lock()
-LAST_AUTO_SUMMARY_EXECUTED_COUNT = 0
 PENDING_TEST_CONFIRMATIONS = {}
+PENDING_TASKS = {}  # Track ongoing tasks for reboot resumption
+PENDING_TASKS_LOCK = threading.Lock()
 
 # ── Agent Skills (progressive disclosure) ──────────────────────
 # Instead of sending one giant system prompt every request, the detailed
@@ -101,18 +161,21 @@ def _parse_skill_file(file_path: str) -> dict | None:
 
 
 def _discover_skills() -> dict:
-    """Scan SKILLS_DIR for skills/<name>/SKILL.md and return {name: skill}."""
+    """Recursively scan SKILLS_DIR for all SKILL.md files and return {name: skill}."""
     skills: dict = {}
     if not os.path.isdir(SKILLS_DIR):
         return skills
 
-    for entry in sorted(os.listdir(SKILLS_DIR)):
-        skill_md = os.path.join(SKILLS_DIR, entry, "SKILL.md")
-        if not os.path.isfile(skill_md):
-            continue
-        parsed = _parse_skill_file(skill_md)
-        if parsed:
-            skills[parsed["name"]] = parsed
+    for root, dirnames, filenames in os.walk(SKILLS_DIR):
+        # Keep discovery deterministic across platforms/runs.
+        dirnames.sort()
+        for filename in sorted(filenames):
+            if filename != "SKILL.md":
+                continue
+            skill_md = os.path.join(root, filename)
+            parsed = _parse_skill_file(skill_md)
+            if parsed:
+                skills[parsed["name"]] = parsed
     return skills
 
 
@@ -145,7 +208,6 @@ BASE_SYSTEM_INSTRUCTION = (
     "When calling tools, always provide ALL required parameters. "
     "Answer clearly and concisely. "
     f"Your program is located at: {SCRIPT_DIR}\n\n"
-
     "## Skills\n"
     "You have specialized skills available. Each skill contains detailed step-by-step "
     "instructions for a domain. The full instructions are NOT loaded yet — only the "
@@ -242,7 +304,11 @@ SYSTEM_BLOCKS_PRECHECK = [
 def _is_test_request(user_text: str) -> bool:
     text = user_text.lower()
     test_keywords = [
-        "test", "validate", "verification", "verify", "schedule",
+        "test",
+        "validate",
+        "verification",
+        "verify",
+        "schedule",
     ]
     return any(k in text for k in test_keywords)
 
@@ -255,7 +321,6 @@ def _parse_confirmation(user_text: str) -> tuple[str, str]:
                        e.g. "yes, but please also check the mic" -> extra="check the mic"
     """
     text = user_text.strip()
-
     yes_pattern = re.compile(
         r"^\s*(yes|yeah|yep|yup|sure|ok|okay|go ahead|go|start|proceed|continue|do it|let'?s go|please start)"
         r"(?:[,!.]?\s+(.*))?$",
@@ -266,43 +331,45 @@ def _parse_confirmation(user_text: str) -> tuple[str, str]:
         r"(?:[,!.]?\s+(.*))?$",
         re.IGNORECASE | re.DOTALL,
     )
-
     m = yes_pattern.match(text)
     if m:
         extra = (m.group(2) or "").strip()
-        extra = re.sub(r"^(but|please|just|also|and|however|though)\s+", "", extra, flags=re.IGNORECASE).strip()
+        extra = re.sub(
+            r"^(but|please|just|also|and|however|though)\s+",
+            "",
+            extra,
+            flags=re.IGNORECASE,
+        ).strip()
         return "yes", extra
 
     m = no_pattern.match(text)
     if m:
         extra = (m.group(2) or "").strip()
-        extra = re.sub(r"^(but|please|just|also|and|however|though)\s+", "", extra, flags=re.IGNORECASE).strip()
+        extra = re.sub(
+            r"^(but|please|just|also|and|however|though)\s+",
+            "",
+            extra,
+            flags=re.IGNORECASE,
+        ).strip()
         return "no", extra
-
     return "pending", ""
 
 
-def _extract_capability_percent(reply_text: str) -> int | None:
-    """Extract capability percentage from precheck text, if present."""
-    if not reply_text:
-        return None
-    match = re.search(r"capability\s*match[^\d]*(\d{1,3})\s*%", reply_text, flags=re.IGNORECASE)
-    if not match:
-        # Fallback: find any percentage value in the reply.
-        match = re.search(r"(\d{1,3})\s*%", reply_text)
-    if not match:
-        return None
-    value = int(match.group(1))
-    return max(0, min(100, value))
-
-
-def _print_step_start(step_index: int, fn_name: str, fn_args: dict, cycle_index: int = 1, step_callback: Callable[[str], None] | None = None) -> None:
+def _print_step_start(
+    step_index: int,
+    fn_name: str,
+    fn_args: dict,
+    cycle_index: int = 1,
+    step_callback: Callable[[str], None] | None = None,
+) -> None:
     """Print a clear step-start marker before each test/tool action."""
     if fn_name == "report_cycle_result":
         cycle = fn_args.get("cycle_number", cycle_index)
         result = fn_args.get("result", "").upper()
         summary = fn_args.get("summary", "")
-        step_text = f"{'='*60}\n  CYCLE {cycle} COMPLETE — {result}\n  {summary}\n{'='*60}"
+        step_text = (
+            f"{'='*60}\n  CYCLE {cycle} COMPLETE — {result}\n  {summary}\n{'='*60}"
+        )
     else:
         step_text = f"Cycle {cycle_index} | Step {step_index}: {fn_name} | args={json.dumps(fn_args, default=str)}"
     print(step_text, flush=True)
@@ -313,40 +380,7 @@ def _print_step_start(step_index: int, fn_name: str, fn_args: dict, cycle_index:
             pass
 
 
-# ── Token usage tracking (disabled – enable only for token comparison) ─────
-# Accumulates token usage across all API calls so the cost of a run can be
-# compared (e.g. ai_agent.py vs ai_agent_skill.py) by sending the same prompt.
-# TOKEN_USAGE = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0}
-#
-#
-# def _track_usage(response, label: str = "") -> None:
-#     """Print this call's token usage and update the running session total."""
-#     usage = getattr(response, "usage", None)
-#     if usage is None:
-#         return
-#     inp = getattr(usage, "input_tokens", 0) or 0
-#     out = getattr(usage, "output_tokens", 0) or 0
-#     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-#     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
-#
-#     TOKEN_USAGE["input"] += inp
-#     TOKEN_USAGE["output"] += out
-#     TOKEN_USAGE["cache_read"] += cache_read
-#     TOKEN_USAGE["cache_write"] += cache_write
-#     TOKEN_USAGE["requests"] += 1
-#
-#     total_in = TOKEN_USAGE["input"] + TOKEN_USAGE["cache_read"] + TOKEN_USAGE["cache_write"]
-#     print(
-#         f"  [TOKENS {label}] this call: input={inp} output={out} "
-#         f"cache_read={cache_read} cache_write={cache_write} | "
-#         f"session: requests={TOKEN_USAGE['requests']} "
-#         f"input(+cache)={total_in} output={TOKEN_USAGE['output']}",
-#         flush=True,
-#     )
-
-
 # ── Agent loop ──────────────────────────────────────────────────
-
 
 def _run_agent_turn(
     messages: list,
@@ -365,7 +399,9 @@ def _run_agent_turn(
 
         if decision == "yes":
             confirmed_execution = True
-            extra_clause = f" Additionally: {extra_instruction}." if extra_instruction else ""
+            extra_clause = (
+                f" Additionally: {extra_instruction}." if extra_instruction else ""
+            )
             user_text = (
                 f"User confirmed to proceed. Execute this test plan now: {pending_request}.{extra_clause} "
                 "Use tools as needed and report each major step result."
@@ -394,14 +430,18 @@ def _run_agent_turn(
         else:
             reminder_reply = (
                 "A test plan is waiting for your confirmation. "
-                "Please reply **yes** to start the test (you can also add extra instructions, e.g. \"yes, but also check the mic\") "
-                "or **no** to cancel (you can also add a new request, e.g. \"no, please just check Bluetooth status\")."
+                'Please reply **yes** to start the test (you can also add extra instructions, e.g. "yes, but also check the mic") '
+                'or **no** to cancel (you can also add a new request, e.g. "no, please just check Bluetooth status").'
             )
             messages.append({"role": "user", "content": user_text})
             messages.append({"role": "assistant", "content": reminder_reply})
             return reminder_reply
 
-    if require_test_confirmation and _is_test_request(user_text) and not confirmed_execution:
+    if (
+        require_test_confirmation
+        and _is_test_request(user_text)
+        and not confirmed_execution
+    ):
         messages.append({"role": "user", "content": user_text})
         precheck_response = client.messages.create(
             model=MODEL,
@@ -409,10 +449,10 @@ def _run_agent_turn(
             system=SYSTEM_BLOCKS_PRECHECK,
             messages=messages,
         )
-        # _track_usage(precheck_response, "precheck")
-        precheck_reply = "".join(block.text for block in precheck_response.content if block.type == "text")
+        precheck_reply = "".join(
+            block.text for block in precheck_response.content if block.type == "text"
+        )
         messages.append({"role": "assistant", "content": precheck_response.content})
-        capability_percent = _extract_capability_percent(precheck_reply)
 
         # Always show the schedule and ask for user confirmation before executing.
         PENDING_TEST_CONFIRMATIONS[session_key] = user_text
@@ -431,7 +471,6 @@ def _run_agent_turn(
         messages=messages,
         tools=ALL_TOOLS,
     )
-    # _track_usage(response, "main")
 
     # Handle tool calls in a loop
     tool_step_index = 0
@@ -448,18 +487,44 @@ def _run_agent_turn(
             fn_name = block.name
             fn_args = block.input if block.input else {}
             tool_step_index += 1
-            _print_step_start(tool_step_index, fn_name, fn_args, cycle_index=cycle_index, step_callback=step_callback)
+            _print_step_start(
+                tool_step_index,
+                fn_name,
+                fn_args,
+                cycle_index=cycle_index,
+                step_callback=step_callback,
+            )
             if print_tool_logs:
                 print(f"  [Tool: {fn_name}({fn_args})]")
 
             fn = ALL_TOOL_FUNCTIONS.get(fn_name)
             if fn:
                 try:
-                    result = fn(**fn_args)
+                    # Special handling for reboot_laptop - pass pending tasks
+                    if fn_name == "reboot_laptop":
+                        with PENDING_TASKS_LOCK:
+                            fn_args_with_tasks = fn_args.copy()
+                            fn_args_with_tasks["pending_tasks"] = PENDING_TASKS
+                            result = fn(**fn_args_with_tasks)
+                    else:
+                        result = fn(**fn_args)
                 except TypeError as e:
                     result = {"error": f"Invalid arguments for {fn_name}: {e}"}
             else:
                 result = {"error": f"Unknown function: {fn_name}"}
+            
+            # Track tasks in progress (for task recovery on reboot)
+            if fn_name == "report_cycle_result":
+                # Extract cycle info from args
+                cycle_num = fn_args.get("cycle_number")
+                cycle_result = fn_args.get("result")
+                if cycle_num:
+                    with PENDING_TASKS_LOCK:
+                        PENDING_TASKS[f"cycle_{cycle_num}"] = {
+                            "cycle_number": cycle_num,
+                            "status": cycle_result,
+                            "timestamp": datetime.now().isoformat()
+                        }
 
             # A completed cycle marker advances the cycle and restarts step numbering.
             if fn_name == "report_cycle_result":
@@ -467,23 +532,38 @@ def _run_agent_turn(
                 tool_step_index = 0
 
             # If screenshot was captured, add image content for vision analysis
-            if fn_name == "capture_screen" and isinstance(result, dict) and result.get("status") == "success":
+            if (
+                fn_name == "capture_screen"
+                and isinstance(result, dict)
+                and result.get("status") == "success"
+            ):
                 with open(result["file_path"], "rb") as img_file:
                     img_b64 = base64.b64encode(img_file.read()).decode("utf-8")
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": [
-                        {"type": "text", "text": json.dumps(result, default=str)},
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
-                    ],
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": [
+                            {"type": "text", "text": json.dumps(result, default=str)},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": img_b64,
+                                },
+                            },
+                        ],
+                    }
+                )
             else:
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result, default=str),
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, default=str),
+                    }
+                )
 
         messages.append({"role": "user", "content": tool_results})
 
@@ -494,78 +574,28 @@ def _run_agent_turn(
             messages=messages,
             tools=ALL_TOOLS,
         )
-        # _track_usage(response, "main")
 
     reply = "".join(block.text for block in response.content if block.type == "text")
     messages.append({"role": "assistant", "content": response.content})
     return reply
 
 
-def _on_scheduled_task(task: dict) -> None:
-    """Execute scheduled tasks using the same tool-driven logic as normal chat."""
-    global LAST_AUTO_SUMMARY_EXECUTED_COUNT
-
-    description = task.get("description", "Scheduled task")
-    task_id = task.get("task_id", "unknown")
-    executed_at = task.get("executed_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    print(
-        f"\n[SCHEDULED REMINDER] {description} (task_id={task_id}, time={executed_at})",
-        flush=True,
-    )
-    try:
-        scheduled_prompt = (
-            "This is a scheduled task in a recurring test flow. "
-            "Keep continuity with prior scheduled task executions in this same run, and reuse previous scheduled results when relevant. "
-            "If this task asks for a final summary/report, summarize all prior scheduled executions in this thread before writing the final report. "
-            f"Task ID: {task_id}. User request: {description}"
-        )
-
-        # Scheduled tasks run in background timers, so protect shared context updates.
-        with SCHEDULED_MESSAGES_LOCK:
-            reply = _run_agent_turn(SCHEDULED_MESSAGES, scheduled_prompt, print_tool_logs=True, require_test_confirmation=False)
-        print(f"\nAgent: {reply}\n", flush=True)
-
-        # Auto-summary: when all scheduled tasks are done, generate a final consolidated report
-        # without requiring an extra manually scheduled "generate report" task.
-        task_overview = list_scheduled_tasks()
-        if task_overview.get("status") == "success":
-            pending_count = task_overview.get("pending_count", 0)
-            executed_count = task_overview.get("executed_count", 0)
-            desc_lower = description.lower()
-            is_explicit_report_task = "report" in desc_lower and "generate" in desc_lower
-
-            should_auto_summarize = (
-                pending_count == 0
-                and executed_count >= 2
-                and executed_count != LAST_AUTO_SUMMARY_EXECUTED_COUNT
-                and not is_explicit_report_task
-            )
-
-            if should_auto_summarize:
-                auto_summary_prompt = (
-                    "All scheduled tasks in this batch are complete. "
-                    "Now generate one final consolidated report based on all scheduled task executions in this conversation context. "
-                    "Include successes/failures and overall pass rate. "
-                    "Save the report under the report folder using the required report naming/content format."
-                )
-                with SCHEDULED_MESSAGES_LOCK:
-                    summary_reply = _run_agent_turn(SCHEDULED_MESSAGES, auto_summary_prompt, print_tool_logs=True, require_test_confirmation=False)
-                LAST_AUTO_SUMMARY_EXECUTED_COUNT = executed_count
-                print(f"\nAgent: {summary_reply}\n", flush=True)
-    except Exception as e:
-        print(
-            f"\nAgent: Scheduled task execution failed for task_id={task_id}. Error: {str(e)}\n",
-            flush=True,
-        )
-
 def run_agent():
     """Run an interactive AI agent loop with tool use."""
-    set_scheduler_notifier(_on_scheduled_task)
+    global PENDING_TASKS
+    
+    # Load any previously saved tasks from before a reboot
+    saved_state = _load_task_state()
+    if saved_state.get("status") == "success" and saved_state.get("task_count", 0) > 0:
+        PENDING_TASKS = saved_state.get("tasks", {})
+        print(f"\n[TASK RECOVERY] Loaded {saved_state['task_count']} pending task(s) from previous session.")
+        print(f"  Saved at: {saved_state.get('saved_at')}\n")
 
     messages = []
     print("=== AI Agent (Anthropic) ===")
-    print("Skills: time, system info, laptop info, list files, read files, run commands, screen capture, bluetooth scan & connect, headset endpoint check, task scheduling")
+    print(
+        "Skills: time, system info, laptop info, list files, read files, run commands, screen capture, bluetooth scan & connect, headset endpoint check"
+    )
     print(f"Loaded {len(SKILLS)} skill(s): {', '.join(SKILLS.keys()) or '(none)'}")
     print("Type 'quit' or 'exit' to stop.\n")
 
@@ -574,19 +604,16 @@ def run_agent():
         if not user_input:
             continue
         if user_input.lower() in ("quit", "exit"):
-            # total_in = TOKEN_USAGE["input"] + TOKEN_USAGE["cache_read"] + TOKEN_USAGE["cache_write"]
-            # print(
-            #     f"\n=== TOKEN TOTAL (ai_agent.py) ===\n"
-            #     f"requests={TOKEN_USAGE['requests']} "
-            #     f"input(+cache)={total_in} output={TOKEN_USAGE['output']} "
-            #     f"(raw input={TOKEN_USAGE['input']} cache_read={TOKEN_USAGE['cache_read']} "
-            #     f"cache_write={TOKEN_USAGE['cache_write']})"
-            # )
+            # Save pending tasks before exiting
+            with PENDING_TASKS_LOCK:
+                if PENDING_TASKS:
+                    _save_task_state(PENDING_TASKS)
             print("Goodbye!")
             break
 
         reply = _run_agent_turn(messages, user_input, print_tool_logs=True)
         print(f"\nAgent: {reply}\n")
+
 
 if __name__ == "__main__":
     run_agent()
