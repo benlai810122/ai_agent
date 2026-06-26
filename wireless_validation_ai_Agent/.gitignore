@@ -3,3 +3,9 @@ report/
 test_assets/driver/
 __pycache__/
 *.pyc
+
+# Build artifacts
+build/
+dist/
+*.toc
+*.pyz
