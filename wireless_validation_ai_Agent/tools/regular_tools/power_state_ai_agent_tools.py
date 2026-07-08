@@ -44,6 +44,81 @@ def go_to_s3() -> dict:
         return {"error": str(e)}
 
 
+def power_state_s3_dexarm_wake(delay_seconds: int, x: float = -40, y: float = 220,
+                               z: float = -58, z_diff: float = 8,
+                               post_wake_settle_s: int = 5) -> dict:
+    """Put the laptop into S3 sleep and wake it with a delayed DexArm double click.
+
+    This runs the full power-state-s3 DexArm flow (Option 2) synchronously and
+    BLOCKS until the laptop has woken and the arm has been returned home:
+      1. Connect + home the DexArm and stage above the mouse target.
+      2. Queue a delayed G4 dwell + double click NON-BLOCKING so the commands
+         sit in the arm's buffer and the host is free to sleep immediately.
+      3. Call go_to_s3() to put the laptop to sleep.
+      4. The arm double-clicks after `delay_seconds`, waking the laptop; this
+         function resumes, settles, homes the arm, and disconnects.
+
+    Because the whole sequence runs in-process, the caller does not return until
+    the laptop is awake again -- do NOT perform other steps until this returns.
+
+    Args:
+        delay_seconds: Seconds from now until the wake-up double click fires.
+        x, y, z: Mouse-click target coordinates (z is the press depth).
+        z_diff: Height to lift between press and release.
+        post_wake_settle_s: Seconds to wait after wake before homing the arm.
+
+    Returns:
+        dict with status and details of the run.
+    """
+    from tools.dexarm_tools.dexarm_ai_agent_tools import (
+        dexarm_connect,
+        dexarm_disconnect,
+        dexarm_go_home,
+        dexarm_move_to,
+        dexarm_send_raw_gcode,
+    )
+    try:
+        conn = dexarm_connect()
+        if conn.get("status") != "success":
+            return {
+                "status": "failure",
+                "message": "Could not connect to DexArm; wake-up NOT armed. Laptop was NOT put to sleep.",
+                "detail": conn,
+            }
+        try:
+            dexarm_go_home()
+            stage_z = z + z_diff
+            # Stage above the target (blocking, so the arm is in position).
+            dexarm_move_to(x=x, y=y, z=stage_z, wait=True)
+
+            # Queue the delayed double click NON-BLOCKING.
+            dexarm_send_raw_gcode(f"G4 S{delay_seconds}", wait=False)
+            for _ in range(3):
+                dexarm_move_to(x=x, y=y, z=z, wait=False)        # press
+                dexarm_move_to(x=x, y=y, z=stage_z, wait=False)  # release
+
+            # Put the laptop to sleep immediately. The process freezes here
+            # while asleep and resumes after the arm's timed click wakes it.
+            sleep_res = go_to_s3()
+
+            # After wake, let the queued click finish, then home the arm.
+            time.sleep(post_wake_settle_s)
+            home_res = dexarm_go_home()
+
+            return {
+                "status": "success",
+                "message": f"S3 wake via DexArm complete. Laptop slept and woke after ~{delay_seconds}s.",
+                "delay_seconds": delay_seconds,
+                "sleep_result": sleep_res,
+                "home_result": home_res.get("status"),
+            }
+        finally:
+            dexarm_disconnect()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+
 def go_to_s4(sleep_time: int = 60, cycles: int = 1, delay_time: int = 90) -> dict:
     """Put the laptop into S4 (hibernate) mode using pwrtest.exe.
 
@@ -105,7 +180,7 @@ def _save_task_state(tasks: dict) -> dict:
         dict with status and file path.
     """
     try:
-        task_state_dir = os.path.join(PROJECT_ROOT, "task_state")
+        task_state_dir = os.path.join(PROJECT_ROOT, "test_assets", "task_state")
         if not os.path.exists(task_state_dir):
             os.makedirs(task_state_dir)
         
@@ -137,7 +212,7 @@ def _load_task_state() -> dict:
         dict with status, tasks, and metadata.
     """
     try:
-        task_file = os.path.join(PROJECT_ROOT, "task_state", "pending_tasks.json")
+        task_file = os.path.join(PROJECT_ROOT, "test_assets", "task_state", "pending_tasks.json")
         
         if not os.path.exists(task_file):
             return {
@@ -158,6 +233,22 @@ def _load_task_state() -> dict:
         }
     except Exception as e:
         return {"error": f"Failed to load task state: {str(e)}", "tasks": {}}
+
+
+def _clear_task_state() -> dict:
+    """Delete the persisted pending-task file once all tasks are finished.
+
+    Returns:
+        dict with status and message.
+    """
+    try:
+        task_file = os.path.join(PROJECT_ROOT, "test_assets", "task_state", "pending_tasks.json")
+        if os.path.exists(task_file):
+            os.remove(task_file)
+            return {"status": "success", "message": "Cleared pending task state"}
+        return {"status": "no_tasks", "message": "No pending task file to clear"}
+    except Exception as e:
+        return {"error": f"Failed to clear task state: {str(e)}"}
 
 
 def schedule_ai_agent_on_startup() -> dict:
@@ -221,11 +312,11 @@ def schedule_ai_agent_on_startup() -> dict:
         return {"error": f"Exception scheduling task: {str(e)}"}
 
 
-def reboot_laptop(delay_seconds: int = 60, save_tasks: bool = True, pending_tasks: dict = None) -> dict:
+def reboot_laptop(delay_seconds: int = 20, save_tasks: bool = True, pending_tasks: dict = None) -> dict:
     """Reboot the laptop with optional task state persistence.
     
     Args:
-        delay_seconds: Seconds to wait before rebooting (default 60).
+        delay_seconds: Seconds to wait before rebooting (default 20).
         save_tasks: Whether to save pending tasks before reboot (default True).
         pending_tasks: Dictionary of pending tasks to save (optional).
         
@@ -284,6 +375,24 @@ POWER_STATE_ANTHROPIC_TOOLS = [
         },
     },
     {
+        "name": "power_state_s3_dexarm_wake",
+        "description": "Put the laptop into S3 sleep and wake it after a delay using a physical DexArm double click. Use this when the DexArm is the wake-up device. This runs the ENTIRE flow synchronously and BLOCKS until the laptop has woken and the arm is homed, so you MUST wait for it to return before doing anything else. Do not call go_to_s3 or any DexArm tools separately for S3 wake-up.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "delay_seconds": {
+                    "type": "integer",
+                    "description": "Seconds from now until the wake-up double click fires (time until the desired wake-up moment)."
+                },
+                "x": {"type": "number", "description": "Mouse-click target X coordinate. Defaults to -40."},
+                "y": {"type": "number", "description": "Mouse-click target Y coordinate. Defaults to 220."},
+                "z": {"type": "number", "description": "Press depth Z coordinate. Defaults to -58."},
+                "z_diff": {"type": "number", "description": "Height to lift between press and release. Defaults to 8."}
+            },
+            "required": ["delay_seconds"],
+        },
+    },
+    {
         "name": "go_to_s4",
         "description": "Put the laptop into S4 (hibernate) mode using pwrtest.exe. The system will hibernate for the specified sleep time and then wake up automatically. Requires administrator privileges.",
         "input_schema": {
@@ -313,7 +422,7 @@ POWER_STATE_ANTHROPIC_TOOLS = [
             "properties": {
                 "delay_seconds": {
                     "type": "integer",
-                    "description": "Seconds to wait before rebooting. Defaults to 60. Minimum is 0."
+                    "description": "Seconds to wait before rebooting. Defaults to 20. Minimum is 0."
                 },
                 "save_tasks": {
                     "type": "boolean",
@@ -336,6 +445,7 @@ POWER_STATE_ANTHROPIC_TOOLS = [
 
 POWER_STATE_TOOL_FUNCTIONS = {
     "go_to_s3": go_to_s3,
+    "power_state_s3_dexarm_wake": power_state_s3_dexarm_wake,
     "go_to_s4": go_to_s4,
     "reboot_laptop": reboot_laptop,
     "schedule_ai_agent_on_startup": schedule_ai_agent_on_startup,

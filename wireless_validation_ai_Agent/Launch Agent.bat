@@ -47,7 +47,7 @@ if not exist "%VENV_PYTHON%" (
 "%VENV_PYTHON%" -c "import flask, yaml, anthropic, httpx" >nul 2>nul
 if not %errorlevel%==0 (
     echo [INFO] Installing required Python packages...
-    "%VENV_PYTHON%" -m pip install --disable-pip-version-check flask pyyaml anthropic httpx
+    "%VENV_PYTHON%" -m pip install --disable-pip-version-check -r requirements.txt
 )
 
 echo [OK] Using %VENV_PYTHON%

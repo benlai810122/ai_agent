@@ -41,6 +41,7 @@ from tools.regular_tools.power_state_ai_agent_tools import (
     POWER_STATE_TOOL_FUNCTIONS,
     _load_task_state,
     _save_task_state,
+    _clear_task_state,
 )
 from tools.driver_install_tools.isst_driver_install_ai_agent_tools import (
     ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS,
@@ -464,6 +465,39 @@ def _run_agent_turn(
 
     messages.append({"role": "user", "content": user_text})
 
+    # Record the task being executed so it can be resumed after a reboot.
+    # If this turn is itself a resume prompt, store only the original task so the
+    # description doesn't nest the "rebooted in the middle" prefix on every cycle.
+    task_to_save = user_text
+    marker = "Original task:\n\n"
+    if user_text.startswith("You were rebooted in the middle of a task") and marker in user_text:
+        task_to_save = user_text.split(marker, 1)[1].strip()
+        # Strip resume-only annotations so the saved description stays the clean
+        # original task and does not accumulate duplicated notes across reboots.
+        for cut in (
+            "\n\nBefore continuing, FIRST call load_skill",
+            "\n\nProgress so far:",
+            "\n\nIMPORTANT — post-reboot resume:",
+        ):
+            idx = task_to_save.find(cut)
+            if idx != -1:
+                task_to_save = task_to_save[:idx].strip()
+    with PENDING_TASKS_LOCK:
+        existing = PENDING_TASKS.get("__current_task__", {})
+        new_current = {
+            "description": task_to_save,
+            "status": "in_progress",
+            "started_at": datetime.now().isoformat(),
+            # Preserve any skills already loaded for this task so they reload on resume.
+            "skills": list(existing.get("skills", [])),
+        }
+        # Preserve an in-progress reboot marker so a mid-cycle reboot phase is not
+        # lost if the task is re-saved before that cycle reports its result.
+        if existing.get("reboot_state"):
+            new_current["reboot_state"] = existing["reboot_state"]
+        PENDING_TASKS["__current_task__"] = new_current
+        _save_task_state(PENDING_TASKS)
+
     response = client.messages.create(
         model=MODEL,
         max_tokens=4096,
@@ -475,6 +509,8 @@ def _run_agent_turn(
     # Handle tool calls in a loop
     tool_step_index = 0
     cycle_index = 1
+    reboot_pending = False
+    
     while any(block.type == "tool_use" for block in response.content):
         assistant_content = response.content
         messages.append({"role": "assistant", "content": assistant_content})
@@ -503,6 +539,27 @@ def _run_agent_turn(
                     # Special handling for reboot_laptop - pass pending tasks
                     if fn_name == "reboot_laptop":
                         with PENDING_TASKS_LOCK:
+                            # Mark that the reboot step of the current cycle is being
+                            # performed. After restart the agent uses this to know the
+                            # reboot is already done and must continue with the steps
+                            # that come AFTER the reboot instead of rebooting again.
+                            completed_cycles = sum(
+                                1 for k in PENDING_TASKS if k.startswith("cycle_")
+                            )
+                            cur = PENDING_TASKS.setdefault(
+                                "__current_task__", {"skills": []}
+                            )
+                            cur["reboot_state"] = {
+                                "rebooted": True,
+                                "cycle_in_progress": completed_cycles + 1,
+                                "next_action": (
+                                    "Reboot already done. Continue this cycle's "
+                                    "remaining steps (everything after the reboot "
+                                    "step), then call report_cycle_result for this "
+                                    "cycle. Do NOT reboot again for this cycle."
+                                ),
+                                "rebooted_at": datetime.now().isoformat(),
+                            }
                             fn_args_with_tasks = fn_args.copy()
                             fn_args_with_tasks["pending_tasks"] = PENDING_TASKS
                             result = fn(**fn_args_with_tasks)
@@ -513,6 +570,21 @@ def _run_agent_turn(
             else:
                 result = {"error": f"Unknown function: {fn_name}"}
             
+            # A reboot was scheduled; keep the saved task file so it resumes after restart.
+            if fn_name == "reboot_laptop" and isinstance(result, dict) and result.get("status") == "success":
+                reboot_pending = True
+
+            # Record which skills were loaded so they can be reloaded after reboot.
+            if fn_name == "load_skill" and isinstance(result, dict) and "error" not in result:
+                skill_name = fn_args.get("name")
+                if skill_name:
+                    with PENDING_TASKS_LOCK:
+                        cur = PENDING_TASKS.setdefault("__current_task__", {"skills": []})
+                        loaded = cur.setdefault("skills", [])
+                        if skill_name not in loaded:
+                            loaded.append(skill_name)
+                        _save_task_state(PENDING_TASKS)
+
             # Track tasks in progress (for task recovery on reboot)
             if fn_name == "report_cycle_result":
                 # Extract cycle info from args
@@ -525,6 +597,13 @@ def _run_agent_turn(
                             "status": cycle_result,
                             "timestamp": datetime.now().isoformat()
                         }
+                        # This cycle finished, so the post-reboot phase is over.
+                        # Clear the reboot marker and persist the completed-cycle
+                        # result immediately so progress survives the next reboot.
+                        cur = PENDING_TASKS.get("__current_task__")
+                        if cur and "reboot_state" in cur:
+                            cur.pop("reboot_state", None)
+                        _save_task_state(PENDING_TASKS)
 
             # A completed cycle marker advances the cycle and restarts step numbering.
             if fn_name == "report_cycle_result":
@@ -577,7 +656,91 @@ def _run_agent_turn(
 
     reply = "".join(block.text for block in response.content if block.type == "text")
     messages.append({"role": "assistant", "content": response.content})
+
+    # Turn finished without rebooting, so the task is complete — clear its state.
+    # If a reboot was scheduled, KEEP the saved file so the task resumes after restart.
+    if not reboot_pending:
+        with PENDING_TASKS_LOCK:
+            PENDING_TASKS.pop("__current_task__", None)
+            _clear_task_state()
     return reply
+
+
+def get_resume_prompt() -> str | None:
+    """Return a resume instruction if an unfinished task was saved before reboot.
+
+    Reads task_state/pending_tasks.json. If a task was in progress, loads it into
+    PENDING_TASKS and returns a prompt telling the agent to continue. Returns None
+    when nothing is pending.
+    """
+    global PENDING_TASKS
+    saved_state = _load_task_state()
+    if saved_state.get("status") != "success" or saved_state.get("task_count", 0) == 0:
+        return None
+
+    tasks = saved_state.get("tasks", {})
+    PENDING_TASKS = tasks
+    current = tasks.get("__current_task__")
+    description = (current or {}).get("description", "").strip()
+    if not description:
+        return None
+
+    # Skills the agent had loaded before reboot must be reloaded so the
+    # detailed instructions are back in context when the task resumes.
+    loaded_skills = (current or {}).get("skills", [])
+    if loaded_skills:
+        skill_list = ", ".join(loaded_skills)
+        skill_note = (
+            "\n\nBefore continuing, FIRST call load_skill for each of these skills "
+            f"to restore the full instructions: {skill_list}."
+        )
+    else:
+        skill_note = ""
+
+    # Summarize cycles already completed so the agent continues instead of
+    # repeating from scratch (which would cause an infinite reboot loop).
+    cycle_keys = sorted(
+        (k for k in tasks if k.startswith("cycle_")),
+        key=lambda k: tasks[k].get("cycle_number", 0),
+    )
+    completed = len(cycle_keys)
+    if completed:
+        done_lines = "\n".join(
+            f"  - Cycle {tasks[k].get('cycle_number')}: {tasks[k].get('status')}"
+            for k in cycle_keys
+        )
+        progress_note = (
+            f"\n\nProgress so far: {completed} cycle(s) already completed:\n{done_lines}\n"
+            "Continue from the NEXT cycle. When the requested total is reached, "
+            "STOP, do NOT reboot again, and report the final result."
+        )
+    else:
+        progress_note = ""
+
+    # If the reboot happened in the MIDDLE of a cycle (reboot is a step inside the
+    # cycle, not the whole cycle), tell the agent the reboot step is already done
+    # so it does not reboot again and loop forever. It must pick up the remaining
+    # steps of that cycle and then call report_cycle_result for it.
+    reboot_state = (current or {}).get("reboot_state") or {}
+    if reboot_state.get("rebooted"):
+        cyc = reboot_state.get("cycle_in_progress", completed + 1)
+        reboot_note = (
+            f"\n\nIMPORTANT — post-reboot resume: The reboot step for cycle {cyc} "
+            "has ALREADY been completed (that reboot is what just restarted this "
+            f"machine). Do NOT reboot again for cycle {cyc}. Continue cycle {cyc} "
+            "starting from the step immediately AFTER the reboot step, run the "
+            f"remaining steps in order, then call report_cycle_result for cycle {cyc} "
+            "before moving on to any further cycle."
+        )
+    else:
+        reboot_note = ""
+
+    return (
+        "You were rebooted in the middle of a task and have just restarted. "
+        "Resume the following unfinished task and continue from where it left off "
+        "(do not repeat already-completed cycles). Original task:\n\n"
+        f"{description}{skill_note}{progress_note}{reboot_note}"
+    )
 
 
 def run_agent():

@@ -1,6 +1,6 @@
 import sys
 from flask import Flask, render_template, request, jsonify
-from ai_agent import _run_agent_turn
+from ai_agent import _run_agent_turn, get_resume_prompt, base_url
 import threading
 import uuid
 import os
@@ -35,6 +35,7 @@ messages = []
 lock = threading.Lock()
 request_states = {}
 request_states_lock = threading.Lock()
+active_request_id = None  # Currently auto-resumed task, surfaced to the UI on load
 HISTORY_FILE = os.path.join(_RUNTIME_DIR, "report", "web_ui_run_history.json")
 MAX_HISTORY_ITEMS = 100
 
@@ -74,7 +75,7 @@ def _append_history_item(item: dict) -> None:
     _write_history(history)
 
 
-def _run_chat_request(request_id: str, user_text: str) -> None:
+def _run_chat_request(request_id: str, user_text: str, require_confirmation: bool = True) -> None:
     def _step_logger(step_text: str) -> None:
         with request_states_lock:
             state = request_states.get(request_id)
@@ -90,6 +91,7 @@ def _run_chat_request(request_id: str, user_text: str) -> None:
                 messages,
                 user_text,
                 print_tool_logs=False,
+                require_test_confirmation=require_confirmation,
                 step_callback=_step_logger,
             )
         with request_states_lock:
@@ -206,7 +208,97 @@ def chat_status(request_id: str):
 def chat_history():
     return jsonify({"history": _read_history()})
 
+
+@app.route('/active_request', methods=['GET'])
+def active_request():
+    """Expose an auto-resumed task so the UI can attach to it on page load."""
+    with request_states_lock:
+        rid = active_request_id
+        state = request_states.get(rid) if rid else None
+        if state:
+            return jsonify({
+                "request_id": rid,
+                "user_text": state.get("user_text", ""),
+                "status": state.get("status", "running"),
+            })
+    return jsonify({"request_id": None})
+
+
+def _wait_for_system_ready(timeout: int = 600) -> None:
+    """Wait until the GNAI endpoint responds before resuming.
+
+    At logon the agent can launch before the network/VPN is up, so resuming
+    immediately fails with a connection error. Poll the GNAI host until it
+    answers (any HTTP response counts), with an upper time bound.
+    """
+    import time
+    import httpx
+    deadline = time.time() + timeout
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            resp = httpx.get(base_url, verify=False, timeout=10)
+            print(f"[TASK RECOVERY] GNAI reachable (HTTP {resp.status_code}); proceeding with resume.")
+            return
+        except Exception as e:
+            print(f"[TASK RECOVERY] Waiting for GNAI (attempt {attempt}): {e}")
+            time.sleep(10)
+    print("[TASK RECOVERY] GNAI readiness wait timed out; proceeding anyway.")
+
+
+def _resume_pending_task_after_reboot() -> None:
+    """If an unfinished task was saved before a reboot, auto-resume it on startup."""
+    global active_request_id
+    if get_resume_prompt() is None:
+        return
+    # Give the OS time to finish logon and bring up services/network first.
+    _wait_for_system_ready()
+    resume_prompt = get_resume_prompt()
+    if not resume_prompt:
+        return
+
+    request_id = str(uuid.uuid4())
+    with request_states_lock:
+        active_request_id = request_id
+        request_states[request_id] = {
+            "status": "running",
+            "progress": [],
+            "reply": "",
+            "error": "",
+            "user_text": "[Auto-resume after reboot]",
+            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ended_at": "",
+        }
+    worker = threading.Thread(
+        target=_run_chat_request,
+        args=(request_id, resume_prompt, False),
+        daemon=True,
+    )
+    worker.start()
+    print("[TASK RECOVERY] Resuming unfinished task from previous session...")
+
+
 if __name__ == '__main__':
     import webbrowser, threading as _th
-    _th.Timer(1.2, lambda: webbrowser.open('http://127.0.0.1:5000')).start()
+
+    def _open_browser():
+        url = 'http://127.0.0.1:5000'
+        try:
+            if webbrowser.open(url):
+                return
+        except Exception:
+            pass
+        # Fallback for elevated/logon sessions where webbrowser may silently fail.
+        try:
+            os.startfile(url)
+        except Exception:
+            try:
+                os.system(f'start "" "{url}"')
+            except Exception:
+                pass
+
+    _th.Timer(1.2, _open_browser).start()
+    # Run resume on a worker thread; it waits for system readiness internally.
+    _th.Thread(target=_resume_pending_task_after_reboot, daemon=True).start()
     app.run(debug=False, host='127.0.0.1', port=5000)

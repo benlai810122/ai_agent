@@ -386,7 +386,28 @@ $(function() {
         loadHistory();
     });
 
+    function attachActiveTask(attempt) {
+        attempt = attempt || 0;
+        $.ajax({
+            url: '/active_request',
+            method: 'GET',
+            success: function(data) {
+                if (!data || !data.request_id) {
+                    if (attempt < 90) {
+                        setTimeout(function() { attachActiveTask(attempt + 1); }, 2000);
+                    }
+                    return;
+                }
+                appendMessage('You', data.user_text || '[Auto-resume after reboot]');
+                setPendingState(true);
+                const indicatorId = addWorkingIndicator();
+                pollChatStatus(data.request_id, indicatorId);
+            }
+        });
+    }
+
     loadHistory();
+    attachActiveTask();
 });
 </script>
 

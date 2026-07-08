@@ -15,7 +15,7 @@ description: >
 Use `dexarm_clicking` to perform a safe click sequence (move above -> press -> release):
 
 ```
-dexarm_clicking(x=180, y=280, z=-54, z_diff=8)
+dexarm_clicking(x=-40, y=220, z=-58, z_diff=8)
 ```
 
 ## Optional Movement Controls
