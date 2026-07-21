@@ -5,7 +5,7 @@ import time
 
 
 def scan_bluetooth_devices(duration: int = 5) -> dict:
-    """Scan for nearby Bluetooth devices and return a list of discovered devices."""
+    """Scan for nearby Bluetooth devices and return the top 10 devices by signal strength (RSSI)."""
     try:
         from bleak import BleakScanner
 
@@ -21,7 +21,17 @@ def scan_bluetooth_devices(duration: int = 5) -> dict:
             ]
 
         discovered = asyncio.run(_scan())
-        return {"status": "success", "device_count": len(discovered), "devices": discovered}
+        total_found = len(discovered)
+        # Keep only the 10 strongest devices (highest RSSI = strongest signal).
+        top_devices = sorted(
+            discovered, key=lambda dev: dev["rssi"], reverse=True
+        )[:10]
+        return {
+            "status": "success",
+            "device_count": len(top_devices),
+            "total_found": total_found,
+            "devices": top_devices,
+        }
     except ImportError:
         return {"error": "bleak package not installed. Run: pip install bleak"}
     except Exception as e:

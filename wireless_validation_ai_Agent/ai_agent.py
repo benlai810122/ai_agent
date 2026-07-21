@@ -39,9 +39,6 @@ from tools.mouse_keyboard_tools.mouse_ai_Agent_tools import (
 from tools.regular_tools.power_state_ai_agent_tools import (
     POWER_STATE_ANTHROPIC_TOOLS,
     POWER_STATE_TOOL_FUNCTIONS,
-    _load_task_state,
-    _save_task_state,
-    _clear_task_state,
 )
 from tools.driver_install_tools.isst_driver_install_ai_agent_tools import (
     ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS,
@@ -57,6 +54,21 @@ from tools.teams_tools.teams_ai_agent_tools import (
     TEAMS_TOOL_FUNCTIONS,
 )
 from anthropic import Anthropic
+
+from ai_skills_loader import (
+    discover_skills,
+    build_skill_catalog,
+    make_load_skill,
+    LOAD_SKILL_TOOL,
+)
+from ai_task_planner import (
+    build_tool_catalog,
+    select_tools_for_task as _select_tools_for_task,
+    generate_test_script as _generate_test_script,
+    format_plan_for_reply,
+)
+from ai_agent_backend import make_script_context_gatherer, DEFAULT_SCRIPT_CONTEXT_TOOLS
+from ai_task_runner import run_test_script
 
 # When frozen by PyInstaller, bundled data files live in sys._MEIPASS.
 # The exe itself is in os.path.dirname(sys.executable).
@@ -110,91 +122,25 @@ ALL_TOOL_FUNCTIONS = {
 MODEL = "claude-4-5-sonnet"
 
 PENDING_TEST_CONFIRMATIONS = {}
-PENDING_TASKS = {}  # Track ongoing tasks for reboot resumption
-PENDING_TASKS_LOCK = threading.Lock()
+PENDING_TEST_SCRIPTS = {}  # Planned test scripts awaiting user confirmation
+
+# The step callback for the turn currently running, so deep helpers (planning,
+# script generation) can route their token-usage logs to the same UI/console
+# sink without threading the callback through every function signature.
+_ACTIVE_STEP_CALLBACK = threading.local()
+
+
+def _current_step_callback():
+    return getattr(_ACTIVE_STEP_CALLBACK, "cb", None)
 
 # ── Agent Skills (progressive disclosure) ──────────────────────
-# Instead of sending one giant system prompt every request, the detailed
-# instructions live in skills/<name>/SKILL.md files. Only each skill's short
-# name + description is always in the system prompt. The model loads the full
-# body of a skill ON DEMAND by calling the load_skill tool. This keeps each
-# request small and avoids hitting the model context limit.
+# The skill discovery/loading helpers live in skills_loader.py to keep this file
+# focused on the agent loop. Only each skill's name + description is always in the
+# system prompt; the full body is loaded on demand via the load_skill tool.
 SKILLS_DIR = os.path.join(SCRIPT_DIR, "skills")
 
-
-def _parse_skill_file(file_path: str) -> dict | None:
-    """Parse a SKILL.md file into {name, description, body}.
-
-    Expected format:
-        ---
-        name: <skill name>
-        description: <text>
-        ---
-        <markdown body>
-    """
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except OSError:
-        return None
-
-    if not content.lstrip().startswith("---"):
-        return None
-
-    # Split off the YAML frontmatter between the first two '---' fences.
-    stripped = content.lstrip()
-    parts = stripped.split("---", 2)
-    if len(parts) < 3:
-        return None
-
-    frontmatter_raw, body = parts[1], parts[2]
-    try:
-        meta = yaml.safe_load(frontmatter_raw) or {}
-    except yaml.YAMLError:
-        return None
-
-    name = str(meta.get("name", "")).strip()
-    description = str(meta.get("description", "")).strip()
-    if not name:
-        return None
-
-    return {"name": name, "description": description, "body": body.strip()}
-
-
-def _discover_skills() -> dict:
-    """Recursively scan SKILLS_DIR for all SKILL.md files and return {name: skill}."""
-    skills: dict = {}
-    if not os.path.isdir(SKILLS_DIR):
-        return skills
-
-    for root, dirnames, filenames in os.walk(SKILLS_DIR):
-        # Keep discovery deterministic across platforms/runs.
-        dirnames.sort()
-        for filename in sorted(filenames):
-            if filename != "SKILL.md":
-                continue
-            skill_md = os.path.join(root, filename)
-            parsed = _parse_skill_file(skill_md)
-            if parsed:
-                skills[parsed["name"]] = parsed
-    return skills
-
-
 # Load all available skills once at startup.
-SKILLS = _discover_skills()
-
-
-def _build_skill_catalog() -> str:
-    """Build the always-on catalog text listing each skill name + description."""
-    if not SKILLS:
-        return "No skills are currently available.\n"
-
-    lines = []
-    for skill in SKILLS.values():
-        # Collapse whitespace so multi-line YAML descriptions read as one line.
-        desc = " ".join(skill["description"].split())
-        lines.append(f"- {skill['name']}: {desc}")
-    return "\n".join(lines)
+SKILLS = discover_skills(SKILLS_DIR)
 
 
 # Small always-on base prompt (the general Role guidance only). The detailed
@@ -217,68 +163,131 @@ BASE_SYSTEM_INSTRUCTION = (
     "them. You may load multiple skills if a task spans several domains. Do not guess "
     "the detailed steps — always load the relevant skill first.\n\n"
     "Available skills:\n"
-    f"{_build_skill_catalog()}\n"
+    f"{build_skill_catalog(SKILLS)}\n"
 )
 
 SYSTEM_INSTRUCTION = BASE_SYSTEM_INSTRUCTION
 
 
-def load_skill(name: str) -> dict:
-    """Tool: return the full instructions (body) for a named skill."""
-    skill = SKILLS.get(name)
-    if not skill:
-        available = ", ".join(SKILLS.keys()) or "(none)"
-        return {
-            "status": "error",
-            "error": f"Unknown skill '{name}'. Available skills: {available}",
-        }
-    return {
-        "status": "success",
-        "name": skill["name"],
-        "instructions": skill["body"],
-    }
-
-
-LOAD_SKILL_TOOL = {
-    "name": "load_skill",
-    "description": (
-        "Load the full detailed instructions for one of the available skills. "
-        "Call this BEFORE performing a task that matches a skill, using the exact "
-        "skill name from the 'Available skills' list. Returns the skill's full "
-        "step-by-step instructions."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "The exact skill name to load (e.g. 'bluetooth-validation').",
-            }
-        },
-        "required": ["name"],
-    },
-}
+# Bind the discovered skills to the load_skill tool implementation.
+load_skill = make_load_skill(SKILLS)
 
 # Register the skill loader alongside the existing tools.
 ALL_TOOLS = ALL_TOOLS + [LOAD_SKILL_TOOL]
 ALL_TOOL_FUNCTIONS["load_skill"] = load_skill
 
-TEST_PRECHECK_SYSTEM_INSTRUCTION = (
-    "You are preparing a test execution precheck. "
-    "Do NOT call any tools in this step. "
-    "Analyze what parts of the user's requested test can be done with currently available tools, and what parts cannot be done. "
-    "When evaluating capability, if a tool can achieve the same outcome through an equivalent method, count it as supported. "
-    "For example: 'turn off Bluetooth' can be done with set_bluetooth_radio_via_ui, 'reconnect headset' can be done with reconnect_bluetooth_via_ui, "
-    "'play music' can be done with open_local_file, 'check audio quality' can be done with record_audio_output + analyze_audio_file. "
-    "Do NOT mark a step as unsupported just because the exact UI path described in the test case is different from the tool's method. "
-    "Only mark a step as unsupported if there is genuinely no tool or equivalent approach available (e.g. reboot, shutdown, physical button press). "
-    "Return a concise plan using this structure: "
-    "1) Planned Test Steps (numbered) — map each original test step to the tool(s) that will be used, "
-    "2) Unsupported Parts (only truly impossible steps), "
-    "3) Capability Match (percentage), "
-    "4) Ask for confirmation to start now (yes/no). "
-    "The capability percentage should reflect the number of achievable steps (including equivalent methods) divided by total requested steps."
-)
+# ── Task planning + test-script generation ─────────────────────
+# The generic planning/scripting logic lives in task_planner.py so both this
+# agent and test_lmstudio_agent.py can share it. Here we just bind it to the
+# Anthropic backend: the LLM call and the tool-schema accessors.
+ALL_TOOLS_BY_NAME = {t["name"]: t for t in ALL_TOOLS}
+
+
+def _get_tool_name(tool) -> str:
+    return tool["name"]
+
+
+def _get_tool_description(tool) -> str:
+    return tool.get("description", "")
+
+
+def _get_tool_params(tool) -> dict:
+    return tool.get("input_schema", {"type": "object", "properties": {}})
+
+
+_TOOL_CATALOG = build_tool_catalog(ALL_TOOLS, _get_tool_name, _get_tool_description)
+
+
+def _plan_llm_call(prompt: str, max_tokens: int) -> str:
+    """LLM call used for planning/scripting (no tools, single user prompt)."""
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=max_tokens,
+        system=SYSTEM_BLOCKS,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    _track_usage(response, "planning", _current_step_callback())
+    return "".join(
+        block.text for block in response.content if block.type == "text"
+    ).strip()
+
+
+def select_tools_for_task(user_goal: str) -> tuple:
+    """Plan + precheck skills, tools, flow and capability (Anthropic-bound wrapper)."""
+    return _select_tools_for_task(
+        user_goal,
+        llm_call=_plan_llm_call,
+        tool_catalog=_TOOL_CATALOG,
+        skill_catalog=build_skill_catalog(SKILLS),
+        tools_by_name=ALL_TOOLS_BY_NAME,
+        valid_skill_names=SKILLS,
+    )
+
+
+def _skills_text(skill_names) -> str:
+    """Concatenate the full instruction bodies of the given skills for the planner."""
+    parts = []
+    for name in skill_names or []:
+        skill = SKILLS.get(name)
+        if skill and skill.get("body"):
+            parts.append(f"### Skill: {skill['name']}\n{skill['body']}")
+    return "\n\n".join(parts)
+
+
+def _generate_ai_report(run_data: dict) -> str:
+    """Have the AI write the final report from the run data + report-format skill.
+
+    The test itself already ran deterministically; this is a single LLM call that
+    turns the collected per-round results (and any error messages) into a polished
+    report following the report-format skill. Returns the report markdown.
+    """
+    skill = SKILLS.get("report-format")
+    skill_body = skill["body"] if skill else ""
+    prompt = (
+        "You are writing the FINAL test report for a test run that has already "
+        "finished. Do NOT call any tools — just write the report text.\n\n"
+        "Follow these report-format rules exactly:\n"
+        f"{skill_body}\n\n"
+        "Here is the raw run data (per-round step results and any error messages). "
+        "Use it as the source of truth — do not invent results:\n"
+        f"{run_data.get('raw_report', '')}\n\n"
+        f"Overall result: {run_data.get('overall')} | Rounds: {run_data.get('rounds')}\n"
+        f"Test start time: {run_data.get('start_time'):%Y-%m-%d %H:%M:%S}\n"
+        f"Test end time: {run_data.get('end_time'):%Y-%m-%d %H:%M:%S}\n\n"
+        "Write the complete final report in Markdown. Include the required sections "
+        "in order (Test Item, Test Result, Summary), plus Test Start Time and Test "
+        "End Time, and a Test Error Happened Time section if any step failed. "
+        "Summarize the rounds and clearly call out any failures with their error "
+        "messages. Output ONLY the report markdown, no extra commentary."
+    )
+    return _plan_llm_call(prompt, 4096)
+
+
+def generate_test_script(
+    user_goal: str, selected_tools: list, flow: list, selected_skills=None
+) -> tuple:
+    """Turn a planned flow into a runnable JSON test script (Anthropic-bound).
+
+    The final report-writing step (write_file) is excluded on purpose — the
+    report is generated after the test finishes using the real tool results,
+    not pre-scripted with placeholder content. The selected skills' full
+    instructions (with their calibrated coordinates/values) are passed in so the
+    script uses the exact parameters instead of guessed ones.
+    """
+    return _generate_test_script(
+        user_goal,
+        selected_tools,
+        flow,
+        llm_call=_plan_llm_call,
+        tools_by_name=ALL_TOOLS_BY_NAME,
+        get_tool_name=_get_tool_name,
+        get_tool_params=_get_tool_params,
+        script_dir=SCRIPT_DIR,
+        exclude_step_tools={"write_file"},
+        gather_context=_gather_script_context,
+        skills_text=_skills_text(selected_skills),
+    )
+
 
 # ── Prompt caching ──────────────────────────────────────────────
 # The system prompt and tool schemas are large and identical on every request.
@@ -296,11 +305,6 @@ SYSTEM_BASE_BLOCK = {
 
 SYSTEM_BLOCKS = [SYSTEM_BASE_BLOCK]
 
-SYSTEM_BLOCKS_PRECHECK = [
-    SYSTEM_BASE_BLOCK,
-    {"type": "text", "text": TEST_PRECHECK_SYSTEM_INSTRUCTION},
-]
-
 
 def _is_test_request(user_text: str) -> bool:
     text = user_text.lower()
@@ -312,6 +316,26 @@ def _is_test_request(user_text: str) -> bool:
         "schedule",
     ]
     return any(k in text for k in test_keywords)
+
+
+def _parse_rounds(user_text: str) -> int:
+    """Extract how many times to run the test. Defaults to 1 when unspecified."""
+    text = (user_text or "").lower()
+    # "<n> times / rounds / iterations / cycles / loops / reps / passes"
+    m = re.search(
+        r"(\d+)\s*(?:times|rounds?|iterations?|cycles?|loops?|reps?|repetitions?|passes)\b",
+        text,
+    )
+    if m:
+        return max(1, int(m.group(1)))
+    # "repeat / iterate / loop / run / cycle <n>"
+    m = re.search(
+        r"(?:repeat|iterate|loop|run|cycle)\s+(?:it\s+|the\s+test\s+)?(\d+)",
+        text,
+    )
+    if m:
+        return max(1, int(m.group(1)))
+    return 1
 
 
 def _parse_confirmation(user_text: str) -> tuple[str, str]:
@@ -381,6 +405,121 @@ def _print_step_start(
             pass
 
 
+# ── Token usage / cost tracking ─────────────────────────────────
+# Approximate per-token USD prices for the model (Claude Sonnet tier). Adjust if
+# your billing rates differ — these are only used to estimate cost.
+TOKEN_PRICING = {
+    "input": 3.00 / 1_000_000,       # normal input tokens
+    "output": 15.00 / 1_000_000,     # output tokens
+    "cache_write": 3.75 / 1_000_000,  # cache creation (write) input tokens
+    "cache_read": 0.30 / 1_000_000,   # cache read (hit) input tokens
+}
+
+# Running total across the whole process so the user sees cumulative cost.
+SESSION_USAGE = {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_write_tokens": 0,
+    "cache_read_tokens": 0,
+    "cost_usd": 0.0,
+}
+
+
+def _track_usage(
+    response,
+    label: str = "",
+    step_callback: Callable[[str], None] | None = None,
+) -> None:
+    """Read token usage from an API response, accumulate it, and report it."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    inp = getattr(usage, "input_tokens", 0) or 0
+    out = getattr(usage, "output_tokens", 0) or 0
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+
+    cost = (
+        inp * TOKEN_PRICING["input"]
+        + out * TOKEN_PRICING["output"]
+        + cache_write * TOKEN_PRICING["cache_write"]
+        + cache_read * TOKEN_PRICING["cache_read"]
+    )
+
+    SESSION_USAGE["input_tokens"] += inp
+    SESSION_USAGE["output_tokens"] += out
+    SESSION_USAGE["cache_write_tokens"] += cache_write
+    SESSION_USAGE["cache_read_tokens"] += cache_read
+    SESSION_USAGE["cost_usd"] += cost
+
+    tag = f" | {label}" if label else ""
+    text = (
+        f"[Tokens{tag}] in={inp} out={out} "
+        f"cache_write={cache_write} cache_read={cache_read} "
+        f"| step ≈ ${cost:.4f} | session ≈ ${SESSION_USAGE['cost_usd']:.4f}"
+    )
+    print(text, flush=True)
+    if step_callback:
+        try:
+            step_callback(text)
+        except Exception:
+            pass
+
+
+def _emit_session_summary(
+    step_callback: Callable[[str], None] | None = None,
+) -> str:
+    """Print + report the cumulative token cost for the whole session so far."""
+    summary = (
+        f"[Session tokens] in={SESSION_USAGE['input_tokens']} "
+        f"out={SESSION_USAGE['output_tokens']} "
+        f"cache_write={SESSION_USAGE['cache_write_tokens']} "
+        f"cache_read={SESSION_USAGE['cache_read_tokens']} "
+        f"| total ≈ ${SESSION_USAGE['cost_usd']:.4f}"
+    )
+    print(summary, flush=True)
+    if step_callback:
+        try:
+            step_callback(summary)
+        except Exception:
+            pass
+    return summary
+
+
+def _emit_thinking(
+    content_blocks,
+    step_callback: Callable[[str], None] | None = None,
+) -> None:
+    """Surface the model's intermediate reasoning/narration text blocks."""
+    for block in content_blocks:
+        if getattr(block, "type", None) == "text":
+            thought = (block.text or "").strip()
+            if not thought:
+                continue
+            text = f"[Thinking] {thought}"
+            print(text, flush=True)
+            if step_callback:
+                try:
+                    step_callback(text)
+                except Exception:
+                    pass
+
+
+# Anthropic-bound helper that gathers real runtime context (report folder path,
+# current time, device names) before the test script is written. The loop itself
+# lives in agent_backend.py to keep this file focused on the agent loop.
+_gather_script_context = make_script_context_gatherer(
+    client=client,
+    model=MODEL,
+    system_blocks=SYSTEM_BLOCKS,
+    tools=ALL_TOOLS,
+    tool_functions=ALL_TOOL_FUNCTIONS,
+    tool_names=DEFAULT_SCRIPT_CONTEXT_TOOLS,
+    track_usage=_track_usage,
+    get_step_callback=_current_step_callback,
+)
+
+
 # ── Agent loop ──────────────────────────────────────────────────
 
 def _run_agent_turn(
@@ -392,6 +531,9 @@ def _run_agent_turn(
 ) -> str:
     """Run one agent turn with tool handling and return final text reply."""
     session_key = id(messages)
+    # Expose this turn's callback so deep planning/scripting helpers can log their
+    # token usage to the same sink (console + web UI progress feed).
+    _ACTIVE_STEP_CALLBACK.cb = step_callback
     pending_request = PENDING_TEST_CONFIRMATIONS.get(session_key)
     confirmed_execution = False
 
@@ -399,18 +541,56 @@ def _run_agent_turn(
         decision, extra_instruction = _parse_confirmation(user_text)
 
         if decision == "yes":
+            plan = PENDING_TEST_SCRIPTS.pop(session_key, None)
+            PENDING_TEST_CONFIRMATIONS.pop(session_key, None)
+            script = (plan or {}).get("script") or {}
+
+            # Deterministic path: with a concrete script and no extra instructions,
+            # run the steps directly by calling each tool function — no LLM, so no
+            # token cost. The model was only used to PLAN the script.
+            has_runnable = bool(
+                script.get("setup") or script.get("steps") or script.get("teardown")
+            )
+            if has_runnable and not extra_instruction:
+                rounds = _parse_rounds(pending_request)
+                messages.append({"role": "user", "content": user_text})
+                reply = run_test_script(
+                    script,
+                    tool_functions=ALL_TOOL_FUNCTIONS,
+                    rounds=rounds,
+                    step_callback=step_callback,
+                    print_logs=print_tool_logs,
+                    script_dir=SCRIPT_DIR,
+                    report_generator=_generate_ai_report,
+                )
+                # Show the cumulative token cost for the whole session so far
+                # (planning + script-context + report generation across turns).
+                _emit_session_summary(step_callback)
+                messages.append({"role": "assistant", "content": reply})
+                return reply
+
+            # Fallback: let the LLM agent execute (e.g. the user added extra
+            # instructions, or no runnable script was produced).
             confirmed_execution = True
             extra_clause = (
                 f" Additionally: {extra_instruction}." if extra_instruction else ""
             )
+            script_clause = ""
+            if script.get("steps"):
+                script_clause = (
+                    " Follow this pre-planned test script (adjust arguments only if "
+                    "the live system state requires it):\n"
+                    + json.dumps(script, indent=2)
+                )
             user_text = (
-                f"User confirmed to proceed. Execute this test plan now: {pending_request}.{extra_clause} "
+                f"User confirmed to proceed. Execute this test plan now: {pending_request}.{extra_clause}"
+                f"{script_clause} "
                 "Use tools as needed and report each major step result."
             )
-            PENDING_TEST_CONFIRMATIONS.pop(session_key, None)
 
         elif decision == "no":
             PENDING_TEST_CONFIRMATIONS.pop(session_key, None)
+            PENDING_TEST_SCRIPTS.pop(session_key, None)
             if extra_instruction:
                 # User cancelled but left a follow-up request — handle it as a fresh turn.
                 cancel_note = "Test execution cancelled."
@@ -444,59 +624,57 @@ def _run_agent_turn(
         and not confirmed_execution
     ):
         messages.append({"role": "user", "content": user_text})
-        precheck_response = client.messages.create(
-            model=MODEL,
-            max_tokens=1200,
-            system=SYSTEM_BLOCKS_PRECHECK,
-            messages=messages,
-        )
-        precheck_reply = "".join(
-            block.text for block in precheck_response.content if block.type == "text"
-        )
-        messages.append({"role": "assistant", "content": precheck_response.content})
 
-        # Always show the schedule and ask for user confirmation before executing.
+        def _status(msg: str) -> None:
+            """Surface a friendly waiting message while the plan is being built."""
+            print(msg, flush=True)
+            if step_callback:
+                try:
+                    step_callback(msg)
+                except Exception:
+                    pass
+
+        # ONE combined step: plan skills/tools/flow, precheck capability, and turn
+        # the flow into a concrete runnable test script (tool calls with proper
+        # parameters). This replaces the old separate precheck + planning calls.
+        _status(
+            "[Planning] Analyzing your request and building the test plan — "
+            "picking the right tools and skills… this can take a moment."
+        )
+        selected_tools, selected_names, selected_skills, flow, assessment = (
+            select_tools_for_task(user_text)
+        )
+        _status(
+            "[Planning] Gathering device info and generating the concrete test "
+            "script with proper parameters…"
+        )
+        script_obj, script_path = generate_test_script(
+            user_text, selected_tools, flow, selected_skills
+        )
+        _status("[Planning] Finalizing the test plan…")
+        rounds = _parse_rounds(user_text)
+        plan_block = format_plan_for_reply(
+            script_obj, script_path, selected_skills, flow, assessment, rounds
+        )
+
+        # Always show the schedule + script and ask for confirmation before running.
         PENDING_TEST_CONFIRMATIONS[session_key] = user_text
+        PENDING_TEST_SCRIPTS[session_key] = {
+            "script": script_obj,
+            "path": script_path,
+            "skills": selected_skills,
+        }
         confirmation_prompt = (
             "\n\n---\n"
             "**Ready to start?** Please reply **yes** to begin or **no** to cancel."
         )
-        return precheck_reply + confirmation_prompt
+        # Report the cumulative token cost for the plan/precheck + script steps.
+        _emit_session_summary(step_callback)
+        reply = plan_block + confirmation_prompt
+        messages.append({"role": "assistant", "content": reply})
+        return reply
 
     messages.append({"role": "user", "content": user_text})
-
-    # Record the task being executed so it can be resumed after a reboot.
-    # If this turn is itself a resume prompt, store only the original task so the
-    # description doesn't nest the "rebooted in the middle" prefix on every cycle.
-    task_to_save = user_text
-    marker = "Original task:\n\n"
-    if user_text.startswith("You were rebooted in the middle of a task") and marker in user_text:
-        task_to_save = user_text.split(marker, 1)[1].strip()
-        # Strip resume-only annotations so the saved description stays the clean
-        # original task and does not accumulate duplicated notes across reboots.
-        for cut in (
-            "\n\nBefore continuing, FIRST call load_skill",
-            "\n\nProgress so far:",
-            "\n\nIMPORTANT — post-reboot resume:",
-        ):
-            idx = task_to_save.find(cut)
-            if idx != -1:
-                task_to_save = task_to_save[:idx].strip()
-    with PENDING_TASKS_LOCK:
-        existing = PENDING_TASKS.get("__current_task__", {})
-        new_current = {
-            "description": task_to_save,
-            "status": "in_progress",
-            "started_at": datetime.now().isoformat(),
-            # Preserve any skills already loaded for this task so they reload on resume.
-            "skills": list(existing.get("skills", [])),
-        }
-        # Preserve an in-progress reboot marker so a mid-cycle reboot phase is not
-        # lost if the task is re-saved before that cycle reports its result.
-        if existing.get("reboot_state"):
-            new_current["reboot_state"] = existing["reboot_state"]
-        PENDING_TASKS["__current_task__"] = new_current
-        _save_task_state(PENDING_TASKS)
 
     response = client.messages.create(
         model=MODEL,
@@ -505,15 +683,18 @@ def _run_agent_turn(
         messages=messages,
         tools=ALL_TOOLS,
     )
+    _track_usage(response, "agent turn", step_callback)
 
     # Handle tool calls in a loop
     tool_step_index = 0
     cycle_index = 1
-    reboot_pending = False
-    
+
     while any(block.type == "tool_use" for block in response.content):
         assistant_content = response.content
         messages.append({"role": "assistant", "content": assistant_content})
+
+        # Show the model's reasoning/narration for this step before running tools.
+        _emit_thinking(assistant_content, step_callback)
 
         tool_results = []
         for block in assistant_content:
@@ -536,74 +717,11 @@ def _run_agent_turn(
             fn = ALL_TOOL_FUNCTIONS.get(fn_name)
             if fn:
                 try:
-                    # Special handling for reboot_laptop - pass pending tasks
-                    if fn_name == "reboot_laptop":
-                        with PENDING_TASKS_LOCK:
-                            # Mark that the reboot step of the current cycle is being
-                            # performed. After restart the agent uses this to know the
-                            # reboot is already done and must continue with the steps
-                            # that come AFTER the reboot instead of rebooting again.
-                            completed_cycles = sum(
-                                1 for k in PENDING_TASKS if k.startswith("cycle_")
-                            )
-                            cur = PENDING_TASKS.setdefault(
-                                "__current_task__", {"skills": []}
-                            )
-                            cur["reboot_state"] = {
-                                "rebooted": True,
-                                "cycle_in_progress": completed_cycles + 1,
-                                "next_action": (
-                                    "Reboot already done. Continue this cycle's "
-                                    "remaining steps (everything after the reboot "
-                                    "step), then call report_cycle_result for this "
-                                    "cycle. Do NOT reboot again for this cycle."
-                                ),
-                                "rebooted_at": datetime.now().isoformat(),
-                            }
-                            fn_args_with_tasks = fn_args.copy()
-                            fn_args_with_tasks["pending_tasks"] = PENDING_TASKS
-                            result = fn(**fn_args_with_tasks)
-                    else:
-                        result = fn(**fn_args)
+                    result = fn(**fn_args)
                 except TypeError as e:
                     result = {"error": f"Invalid arguments for {fn_name}: {e}"}
             else:
                 result = {"error": f"Unknown function: {fn_name}"}
-            
-            # A reboot was scheduled; keep the saved task file so it resumes after restart.
-            if fn_name == "reboot_laptop" and isinstance(result, dict) and result.get("status") == "success":
-                reboot_pending = True
-
-            # Record which skills were loaded so they can be reloaded after reboot.
-            if fn_name == "load_skill" and isinstance(result, dict) and "error" not in result:
-                skill_name = fn_args.get("name")
-                if skill_name:
-                    with PENDING_TASKS_LOCK:
-                        cur = PENDING_TASKS.setdefault("__current_task__", {"skills": []})
-                        loaded = cur.setdefault("skills", [])
-                        if skill_name not in loaded:
-                            loaded.append(skill_name)
-                        _save_task_state(PENDING_TASKS)
-
-            # Track tasks in progress (for task recovery on reboot)
-            if fn_name == "report_cycle_result":
-                # Extract cycle info from args
-                cycle_num = fn_args.get("cycle_number")
-                cycle_result = fn_args.get("result")
-                if cycle_num:
-                    with PENDING_TASKS_LOCK:
-                        PENDING_TASKS[f"cycle_{cycle_num}"] = {
-                            "cycle_number": cycle_num,
-                            "status": cycle_result,
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        # This cycle finished, so the post-reboot phase is over.
-                        # Clear the reboot marker and persist the completed-cycle
-                        # result immediately so progress survives the next reboot.
-                        cur = PENDING_TASKS.get("__current_task__")
-                        if cur and "reboot_state" in cur:
-                            cur.pop("reboot_state", None)
-                        _save_task_state(PENDING_TASKS)
 
             # A completed cycle marker advances the cycle and restarts step numbering.
             if fn_name == "report_cycle_result":
@@ -653,107 +771,19 @@ def _run_agent_turn(
             messages=messages,
             tools=ALL_TOOLS,
         )
+        _track_usage(response, "agent turn", step_callback)
 
     reply = "".join(block.text for block in response.content if block.type == "text")
     messages.append({"role": "assistant", "content": response.content})
 
-    # Turn finished without rebooting, so the task is complete — clear its state.
-    # If a reboot was scheduled, KEEP the saved file so the task resumes after restart.
-    if not reboot_pending:
-        with PENDING_TASKS_LOCK:
-            PENDING_TASKS.pop("__current_task__", None)
-            _clear_task_state()
+    # Report the cumulative token cost for the whole session so far.
+    _emit_session_summary(step_callback)
+
     return reply
-
-
-def get_resume_prompt() -> str | None:
-    """Return a resume instruction if an unfinished task was saved before reboot.
-
-    Reads task_state/pending_tasks.json. If a task was in progress, loads it into
-    PENDING_TASKS and returns a prompt telling the agent to continue. Returns None
-    when nothing is pending.
-    """
-    global PENDING_TASKS
-    saved_state = _load_task_state()
-    if saved_state.get("status") != "success" or saved_state.get("task_count", 0) == 0:
-        return None
-
-    tasks = saved_state.get("tasks", {})
-    PENDING_TASKS = tasks
-    current = tasks.get("__current_task__")
-    description = (current or {}).get("description", "").strip()
-    if not description:
-        return None
-
-    # Skills the agent had loaded before reboot must be reloaded so the
-    # detailed instructions are back in context when the task resumes.
-    loaded_skills = (current or {}).get("skills", [])
-    if loaded_skills:
-        skill_list = ", ".join(loaded_skills)
-        skill_note = (
-            "\n\nBefore continuing, FIRST call load_skill for each of these skills "
-            f"to restore the full instructions: {skill_list}."
-        )
-    else:
-        skill_note = ""
-
-    # Summarize cycles already completed so the agent continues instead of
-    # repeating from scratch (which would cause an infinite reboot loop).
-    cycle_keys = sorted(
-        (k for k in tasks if k.startswith("cycle_")),
-        key=lambda k: tasks[k].get("cycle_number", 0),
-    )
-    completed = len(cycle_keys)
-    if completed:
-        done_lines = "\n".join(
-            f"  - Cycle {tasks[k].get('cycle_number')}: {tasks[k].get('status')}"
-            for k in cycle_keys
-        )
-        progress_note = (
-            f"\n\nProgress so far: {completed} cycle(s) already completed:\n{done_lines}\n"
-            "Continue from the NEXT cycle. When the requested total is reached, "
-            "STOP, do NOT reboot again, and report the final result."
-        )
-    else:
-        progress_note = ""
-
-    # If the reboot happened in the MIDDLE of a cycle (reboot is a step inside the
-    # cycle, not the whole cycle), tell the agent the reboot step is already done
-    # so it does not reboot again and loop forever. It must pick up the remaining
-    # steps of that cycle and then call report_cycle_result for it.
-    reboot_state = (current or {}).get("reboot_state") or {}
-    if reboot_state.get("rebooted"):
-        cyc = reboot_state.get("cycle_in_progress", completed + 1)
-        reboot_note = (
-            f"\n\nIMPORTANT — post-reboot resume: The reboot step for cycle {cyc} "
-            "has ALREADY been completed (that reboot is what just restarted this "
-            f"machine). Do NOT reboot again for cycle {cyc}. Continue cycle {cyc} "
-            "starting from the step immediately AFTER the reboot step, run the "
-            f"remaining steps in order, then call report_cycle_result for cycle {cyc} "
-            "before moving on to any further cycle."
-        )
-    else:
-        reboot_note = ""
-
-    return (
-        "You were rebooted in the middle of a task and have just restarted. "
-        "Resume the following unfinished task and continue from where it left off "
-        "(do not repeat already-completed cycles). Original task:\n\n"
-        f"{description}{skill_note}{progress_note}{reboot_note}"
-    )
 
 
 def run_agent():
     """Run an interactive AI agent loop with tool use."""
-    global PENDING_TASKS
-    
-    # Load any previously saved tasks from before a reboot
-    saved_state = _load_task_state()
-    if saved_state.get("status") == "success" and saved_state.get("task_count", 0) > 0:
-        PENDING_TASKS = saved_state.get("tasks", {})
-        print(f"\n[TASK RECOVERY] Loaded {saved_state['task_count']} pending task(s) from previous session.")
-        print(f"  Saved at: {saved_state.get('saved_at')}\n")
-
     messages = []
     print("=== AI Agent (Anthropic) ===")
     print(
@@ -767,10 +797,6 @@ def run_agent():
         if not user_input:
             continue
         if user_input.lower() in ("quit", "exit"):
-            # Save pending tasks before exiting
-            with PENDING_TASKS_LOCK:
-                if PENDING_TASKS:
-                    _save_task_state(PENDING_TASKS)
             print("Goodbye!")
             break
 

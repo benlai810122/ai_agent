@@ -121,6 +121,13 @@ def dexarm_move_to(x: float = None, y: float = None, z: float = None, e: float =
             cmd += "E" + str(round(e))
         cmd += "\r\n"
         resp = _dexarm_send_cmd(cmd, wait=wait)
+        # A move is acked ('ok') as soon as it is QUEUED, not when the arm
+        # physically arrives. M400 blocks until the motion buffer drains, so the
+        # function only returns once the move has actually finished. Without this,
+        # back-to-back callers (e.g. the deterministic script runner) race ahead
+        # and take screenshots / send clicks before the arm has moved.
+        if wait:
+            _dexarm_send_cmd("M400\r", wait=True)
         return {"status": "success", "action": "move_to", "command": cmd.strip(), "response": resp}
     except Exception as e:
         return {"error": str(e)}
@@ -440,6 +447,10 @@ def dexarm_clicking(x: float, y: float, z: float, z_diff: float = 5) -> dict:
         # Fast release up
         cmd_release = f"G0X{round(x)}Y{round(y)}Z{round(release_z)}\r\n"
         resp = _dexarm_send_cmd(cmd_release, wait=True)
+        # The above/press/release moves are only QUEUED when 'ok' returns; wait for
+        # the motion buffer to drain so the click has physically completed before
+        # this function returns (otherwise the next step runs mid-click).
+        _dexarm_send_cmd("M400\r", wait=True)
         return {"status": "success", "action": "clicking", "x": x, "y": y, "z_press": z, "z_release": release_z, "response": resp}
     except Exception as e:
         return {"error": str(e)}

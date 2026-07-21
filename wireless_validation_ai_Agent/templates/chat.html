@@ -141,6 +141,10 @@ $(function() {
                     <div class="message-content working-content">
                         Working<span class="dot-anim"><span>.</span><span>.</span><span>.</span></span>
                     </div>
+                    <div class="working-progress-bar indeterminate">
+                        <div class="working-progress-bar-fill"></div>
+                    </div>
+                    <div class="working-progress-bar-label"></div>
                     <div class="working-progress-wrap d-none">
                         <div class="working-progress-title">Test Progress</div>
                         <ul class="working-progress-list mb-0"></ul>
@@ -176,7 +180,112 @@ $(function() {
         setTimeout(doScroll, 60);
     }
 
+    function progressLineClass(text) {
+        const t = text || '';
+        if (t.includes('[Session tokens')) return 'progress-line progress-cost progress-cost-total';
+        if (t.includes('[Tokens')) return 'progress-line progress-cost';
+        if (t.includes('[Thinking')) return 'progress-line progress-thinking';
+        if (t.includes('[Planning')) return 'progress-line progress-status';
+        if (t.includes('[Runner')) return 'progress-line progress-runner';
+        if (t.includes('[Context')) return 'progress-line progress-context';
+        return 'progress-line';
+    }
+
+    // Turn a status line into a short human message for the working bubble.
+    function friendlyStatus(text) {
+        const m = (text || '').trim().match(/^\[(Planning|Runner|Context)\]\s*(.*)$/);
+        if (!m) return null;
+        return (m[2] || m[1]).trim();
+    }
+
+    // Reflect the latest planning/runner status as the working bubble's main text.
+    function updateWorkingStatus(indicatorId, text) {
+        const s = friendlyStatus(text);
+        if (!s) return;
+        const el = $(`#${indicatorId} .working-content`);
+        if (el.length) {
+            el.html(
+                `${escapeHtml(s)}` +
+                '<span class="dot-anim"><span>.</span><span>.</span><span>.</span></span>'
+            );
+        }
+    }
+
+    // A progress line is a token/cost line we also echo at the top of the reply.
+    function isTokenLine(text) {
+        const t = text || '';
+        return t.includes('[Tokens') || t.includes('[Session tokens');
+    }
+
+    // Pull the latest "total ≈ $X" figure out of a session-token line, if present.
+    function extractSessionCost(text) {
+        const m = (text || '').match(/total\s*\u2248?\s*\$([0-9]+\.[0-9]+)/i);
+        return m ? m[1] : null;
+    }
+
+    function updateCostBadge(indicatorId, text) {
+        const cost = extractSessionCost(text);
+        if (!cost) return;
+        const title = $(`#${indicatorId} .working-progress-title`);
+        if (title.length) {
+            title.html(`Test Progress <span class="cost-badge">Session ≈ $${cost}</span>`);
+        }
+    }
+
+    // Render a token-info block (used at the top of an agent reply bubble).
+    function buildTokenInfoBlock(tokenLines) {
+        if (!tokenLines || !tokenLines.length) return '';
+        const rows = tokenLines
+            .map(l => `<div class="${progressLineClass(l)}">${escapeHtml(l)}</div>`)
+            .join('');
+        return `<div class="reply-token-info">${rows}</div>`;
+    }
+
+    // Agent reply bubble with the token/cost info shown at the bottom of the block.
+    function appendAgentReply(text, tokenLines) {
+        const contentHtml = renderMessageContent('Agent', text);
+        const tokensHtml = buildTokenInfoBlock(tokenLines);
+        $('#chat-body').append(
+            `<div class="message-row d-flex justify-content-start">
+                <div class="message-bubble agent-bubble">
+                    <div class="message-sender">Agent</div>
+                    <div class="message-content">${contentHtml}</div>
+                    ${tokensHtml}
+                </div>
+            </div>`
+        );
+        $('#chat-body').scrollTop($('#chat-body')[0].scrollHeight);
+    }
+
+    // Drive the progress bar: determinate on "[Progress] d/t", indeterminate
+    // (animated) while planning before any step counts arrive.
+    function updateProgressBar(indicatorId, text) {
+        const bar = $(`#${indicatorId} .working-progress-bar`);
+        if (!bar.length) return;
+        const fill = bar.find('.working-progress-bar-fill');
+        const label = $(`#${indicatorId} .working-progress-bar-label`);
+        const m = (text || '').match(/\[Progress\]\s*(\d+)\s*\/\s*(\d+)/);
+        if (m) {
+            const done = parseInt(m[1], 10);
+            const total = Math.max(1, parseInt(m[2], 10));
+            const pct = Math.min(100, Math.round((done / total) * 100));
+            bar.removeClass('indeterminate').addClass('has-progress');
+            fill.css('width', pct + '%');
+            label.text(`${done}/${total} steps (${pct}%)`);
+            return;
+        }
+        // Keep the animated bar while still planning (no counts yet).
+        if (!bar.hasClass('has-progress') && friendlyStatus(text)) {
+            bar.addClass('indeterminate');
+        }
+    }
+
     function appendProgressLine(indicatorId, text) {
+        updateProgressBar(indicatorId, text);
+        // Progress markers drive the bar only — don't clutter the step list.
+        if ((text || '').includes('[Progress]')) {
+            return;
+        }
         const row = $(`#${indicatorId}`);
         const wrap = row.find('.working-progress-wrap');
         const list = row.find('.working-progress-list');
@@ -184,7 +293,9 @@ $(function() {
             return;
         }
         wrap.removeClass('d-none');
-        list.append(`<li>${escapeHtml(text)}</li>`);
+        list.append(`<li class="${progressLineClass(text)}">${escapeHtml(text)}</li>`);
+        updateCostBadge(indicatorId, text);
+        updateWorkingStatus(indicatorId, text);
         forceScrollToLatest(indicatorId);
     }
 
@@ -207,10 +318,15 @@ $(function() {
         const statusClass = run.status === 'done' ? 'status-done' : 'status-error';
         const safePrompt = escapeHtml(run.user_text || '(no prompt)');
         const progress = run.progress || [];
-        const stepsHtml = progress.length
-            ? progress.map(p => {
+        const visible = progress.filter(p => {
+            const item = normalizeProgressItem(p);
+            return !(item.text || '').includes('[Progress]');
+        });
+        const stepsHtml = visible.length
+            ? visible.map(p => {
                 const item = normalizeProgressItem(p);
-                return `<li>${escapeHtml(formatProgressLine(item))}</li>`;
+                const line = formatProgressLine(item);
+                return `<li class="${progressLineClass(item.text)}">${escapeHtml(line)}</li>`;
             }).join('')
             : '<li>No tool-step logs captured.</li>';
 
@@ -264,6 +380,7 @@ $(function() {
     function pollChatStatus(requestId, indicatorId) {
         let shownProgress = 0;
         let consecutiveErrors = 0;
+        const tokenLines = [];  // token/cost lines to echo atop the final reply
         const MAX_POLL_RETRIES = 10;
 
         const tick = function() {
@@ -277,7 +394,11 @@ $(function() {
                     const progress = data.progress || [];
                     for (let i = shownProgress; i < progress.length; i++) {
                         const item = normalizeProgressItem(progress[i]);
-                        appendProgressLine(indicatorId, formatProgressLine(item));
+                        const line = formatProgressLine(item);
+                        appendProgressLine(indicatorId, line);
+                        if (isTokenLine(item.text)) {
+                            tokenLines.push(line);
+                        }
                     }
                     shownProgress = progress.length;
 
@@ -287,7 +408,7 @@ $(function() {
 
                     if (data.status === 'done') {
                         removeWorkingIndicator(indicatorId);
-                        appendMessage('Agent', data.reply || 'Done.');
+                        appendAgentReply(data.reply || 'Done.', tokenLines);
                         setPendingState(false);
                         loadHistory();
                         return;
@@ -295,7 +416,7 @@ $(function() {
 
                     if (data.status === 'error') {
                         removeWorkingIndicator(indicatorId);
-                        appendMessage('Agent', `Error: ${data.error || 'Unknown server error.'}`);
+                        appendAgentReply(`Error: ${data.error || 'Unknown server error.'}`, tokenLines);
                         setPendingState(false);
                         loadHistory();
                         return;

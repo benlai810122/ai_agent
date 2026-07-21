@@ -35,17 +35,22 @@ dexarm_move_to(x=175, y=160, mode="G0")
 ```
 
 ## Press the Power Button
+Choose the press type based on the intended action:
+
+- To start Bluetooth searching (pairing mode), long press the power button for 5 seconds.
+- To power on/off the headset, use a quick click on the power button.
+
 After reaching the staging position (X=175, Y=160, Z=80), use a quick click at the button (z_diff=8):
 
 ```
 dexarm_clicking(x=175, y=160, z=50, z_diff=8)
 ```
 
-For a long press (e.g. power on/off hold), press down, wait, then release:
+For a long press (e.g. Bluetooth searching / pairing mode), press down, wait 5 seconds, then release:
 
 ```
 dexarm_move_to(x=175, y=160, z=50, mode="G0")
-dexarm_delay_s(3)
+dexarm_delay_s(5)
 dexarm_move_to(x=175, y=160, z=80, mode="G0")
 ```
 

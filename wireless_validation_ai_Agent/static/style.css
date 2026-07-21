@@ -178,6 +178,24 @@ body.agent-running {
 
 body.agent-running .hero-dot-label { color: var(--brand-strong); }
 
+/* Token/cost info shown at the bottom of an agent reply bubble. */
+.reply-token-info {
+    margin: 0.5rem 0 0 0;
+    padding: 0.4rem 0.6rem;
+    border-radius: 0.4rem;
+    background: rgba(31, 122, 77, 0.06);
+    border: 1px solid rgba(31, 122, 77, 0.18);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+.reply-token-info .progress-cost { color: #1f7a4d; font-weight: 600; }
+.reply-token-info .progress-cost::before { content: '$ '; color: #1f7a4d; }
+.reply-token-info .progress-cost-total { color: #b26a00; }
+.reply-token-info .progress-cost-total::before { content: 'Σ '; color: #b26a00; }
+
 /* ══════════════════════════════════════════════
    MAIN CARD
 ══════════════════════════════════════════════ */
@@ -363,6 +381,47 @@ body.agent-running .hud-card {
     color: var(--brand-strong);
 }
 
+/* Dynamic progress bar in the working bubble. */
+.working-progress-bar {
+    position: relative;
+    height: 8px;
+    margin: 0.5rem 0 0.25rem;
+    border-radius: 6px;
+    background: rgba(96, 163, 218, 0.20);
+    overflow: hidden;
+}
+
+.working-progress-bar-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 0%;
+    border-radius: 6px;
+    background: linear-gradient(90deg, var(--brand), var(--brand-bright, #00c7fd));
+    transition: width 0.35s ease;
+}
+
+/* Indeterminate (planning) animation: a shuttling highlight. */
+.working-progress-bar.indeterminate .working-progress-bar-fill {
+    width: 40%;
+    transition: none;
+    animation: progressSlide 1.1s ease-in-out infinite;
+}
+
+@keyframes progressSlide {
+    0% { left: -40%; }
+    100% { left: 100%; }
+}
+
+.working-progress-bar-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.66rem;
+    color: #527896;
+    margin-bottom: 0.35rem;
+    min-height: 0.9rem;
+}
+
 .working-progress-list {
     margin: 0;
     padding-left: 0;
@@ -385,6 +444,90 @@ body.agent-running .hud-card {
 .working-progress-list li::before {
     content: '▸ ';
     color: var(--brand);
+}
+
+/* Token/cost lines stand out from ordinary tool-step logs. */
+.working-progress-list li.progress-cost,
+.timeline-steps li.progress-cost {
+    color: #1f7a4d;
+    font-weight: 600;
+}
+
+.working-progress-list li.progress-cost::before,
+.timeline-steps li.progress-cost::before {
+    content: '$ ';
+    color: #1f7a4d;
+}
+
+.working-progress-list li.progress-cost-total,
+.timeline-steps li.progress-cost-total {
+    color: #b26a00;
+}
+
+.working-progress-list li.progress-cost-total::before,
+.timeline-steps li.progress-cost-total::before {
+    content: 'Σ ';
+    color: #b26a00;
+}
+
+/* The model's intermediate reasoning/narration lines. */
+.working-progress-list li.progress-thinking,
+.timeline-steps li.progress-thinking {
+    color: #6a4bb2;
+    font-style: italic;
+}
+
+.working-progress-list li.progress-thinking::before,
+.timeline-steps li.progress-thinking::before {
+    content: '💭 ';
+}
+
+/* Planning status lines (building the test plan). */
+.working-progress-list li.progress-status,
+.timeline-steps li.progress-status {
+    color: var(--brand-strong);
+    font-weight: 600;
+}
+
+.working-progress-list li.progress-status::before,
+.timeline-steps li.progress-status::before {
+    content: '⏳ ';
+}
+
+/* Deterministic runner step lines. */
+.working-progress-list li.progress-runner,
+.timeline-steps li.progress-runner {
+    color: #2a6f97;
+}
+
+.working-progress-list li.progress-runner::before,
+.timeline-steps li.progress-runner::before {
+    content: '▶ ';
+    color: #2a6f97;
+}
+
+/* Context-gathering lines. */
+.working-progress-list li.progress-context,
+.timeline-steps li.progress-context {
+    color: #6a4bb2;
+}
+
+.working-progress-list li.progress-context::before,
+.timeline-steps li.progress-context::before {
+    content: '🔎 ';
+}
+
+/* Running session-cost badge shown in the progress title. */
+.cost-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 0.5rem;
+    background: rgba(31, 122, 77, 0.12);
+    color: #1f7a4d;
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    text-transform: none;
 }
 
 .message-sender {
