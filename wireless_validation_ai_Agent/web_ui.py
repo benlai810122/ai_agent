@@ -246,38 +246,7 @@ def _wait_for_system_ready(timeout: int = 600) -> None:
             time.sleep(10)
     print("[TASK RECOVERY] GNAI readiness wait timed out; proceeding anyway.")
 
-
-def _resume_pending_task_after_reboot() -> None:
-    """If an unfinished task was saved before a reboot, auto-resume it on startup."""
-    global active_request_id
-    if get_resume_prompt() is None:
-        return
-    # Give the OS time to finish logon and bring up services/network first.
-    _wait_for_system_ready()
-    resume_prompt = get_resume_prompt()
-    if not resume_prompt:
-        return
-
-    request_id = str(uuid.uuid4())
-    with request_states_lock:
-        active_request_id = request_id
-        request_states[request_id] = {
-            "status": "running",
-            "progress": [],
-            "reply": "",
-            "error": "",
-            "user_text": "[Auto-resume after reboot]",
-            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ended_at": "",
-        }
-    worker = threading.Thread(
-        target=_run_chat_request,
-        args=(request_id, resume_prompt, False),
-        daemon=True,
-    )
-    worker.start()
-    print("[TASK RECOVERY] Resuming unfinished task from previous session...")
-
+ 
 
 def _wait_for_system_ready(timeout: int = 600) -> None:
     """Wait until the GNAI endpoint responds before resuming.

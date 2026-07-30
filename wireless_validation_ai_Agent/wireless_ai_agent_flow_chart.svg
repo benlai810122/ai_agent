@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="900" viewBox="0 0 1800 900">
+  <defs>
+    <style>
+      .bg { fill: #f4f7fb; }
+      .title { font: 700 34px 'Segoe UI', Tahoma, sans-serif; fill: #0f2a3d; }
+      .subtitle { font: 500 17px 'Segoe UI', Tahoma, sans-serif; fill: #2d4a5f; }
+      .stepbox { fill: #ffffff; stroke: #2f5d7c; stroke-width: 2.6; rx: 14; ry: 14; }
+      .stepnum { font: 800 22px 'Segoe UI', Tahoma, sans-serif; fill: #14415c; }
+      .steptitle { font: 700 20px 'Segoe UI', Tahoma, sans-serif; fill: #11344a; }
+      .body { font: 500 16px 'Segoe UI', Tahoma, sans-serif; fill: #1f4259; }
+      .file { font: 700 15px 'Consolas', 'Courier New', monospace; fill: #0f577f; }
+      .line { stroke: #456178; stroke-width: 2.6; fill: none; }
+      .note { font: 600 15px 'Segoe UI', Tahoma, sans-serif; fill: #3a5265; }
+      .badgeText { font: 800 13px 'Segoe UI', Tahoma, sans-serif; fill: #ffffff; }
+      .legendText { font: 700 14px 'Segoe UI', Tahoma, sans-serif; fill: #1f4259; }
+      .bigCost { font: 900 34px 'Segoe UI', Tahoma, sans-serif; fill: #1b7f3a; }
+      .bigCostSub { font: 700 19px 'Segoe UI', Tahoma, sans-serif; fill: #1f4259; }
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 z" fill="#456178"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1800" height="900"/>
+
+  <text x="70" y="64" class="title">Wireless AI Agent Test Flow</text>
+
+  <!-- Token legend -->
+  <circle cx="1330" cy="72" r="12" fill="#d62828"/>
+  <text x="1350" y="77" class="legendText">Token Cost</text>
+  <circle cx="1480" cy="72" r="12" fill="#2a9d4a"/>
+  <text x="1500" y="77" class="legendText">0 Token Cost</text>
+
+  <!-- Step 1 -->
+  <rect class="stepbox" x="70" y="140" width="780" height="130"/>
+  <text x="95" y="180" class="stepnum">Step 1</text>
+  <text x="210" y="180" class="steptitle">Load tools schema, skills description, and user test needs</text>
+  <text x="210" y="208" class="body">AI Agent initializes model context and combines required tool schemas.</text>
+  <text x="210" y="234" class="file">Module: ai_agent.py</text>
+  <circle cx="110" cy="242" r="18" fill="#d62828"/>
+  <text x="94" y="247" class="badgeText">TOKEN</text>
+
+  <!-- Step 2 -->
+  <rect class="stepbox" x="960" y="140" width="770" height="130"/>
+  <text x="985" y="180" class="stepnum">Step 2</text>
+  <text x="1100" y="180" class="steptitle">Choose which skills and tools are needed for this test</text>
+  <text x="1100" y="208" class="body">Agent selects best-fit skill instructions and tool set for requested validation.</text>
+  <text x="1100" y="234" class="file">Modules: ai_skills_loader.py + ai_task_planner.py</text>
+  <circle cx="1000" cy="242" r="18" fill="#d62828"/>
+  <text x="984" y="247" class="badgeText">TOKEN</text>
+
+  <!-- Step 3 -->
+  <rect class="stepbox" x="960" y="350" width="770" height="150"/>
+  <text x="985" y="390" class="stepnum">Step 3</text>
+  <text x="1100" y="390" class="steptitle">Gather required info, generate test script, and save script file</text>
+  <text x="1100" y="418" class="body">Agent runs preparation/info tools first, then writes a concrete runnable test script.</text>
+  <text x="1100" y="444" class="file">Module: ai_task_planner.py</text>
+  <text x="1100" y="468" class="body">Output: test_scripts/test_script_YYYYMMDD_HHMMSS.json</text>
+  <circle cx="1000" cy="472" r="18" fill="#d62828"/>
+  <text x="984" y="477" class="badgeText">TOKEN</text>
+
+  <!-- Step 4 -->
+  <rect class="stepbox" x="70" y="350" width="780" height="150"/>
+  <text x="95" y="390" class="stepnum">Step 4</text>
+  <text x="210" y="390" class="steptitle">Show task precheck table to user</text>
+  <text x="210" y="418" class="body">Display achievement rate, planned flow, and generated test script for confirmation.</text>
+  <text x="210" y="444" class="file">Module: ai_agent.py (format_plan_for_reply)</text>
+  <text x="210" y="468" class="body">User must confirm before execution starts.</text>
+  <circle cx="110" cy="472" r="18" fill="#2a9d4a"/>
+  <text x="102" y="477" class="badgeText">0</text>
+
+  <!-- Step 5 -->
+  <rect class="stepbox" x="70" y="600" width="780" height="150"/>
+  <text x="95" y="640" class="stepnum">Step 5</text>
+  <text x="210" y="640" class="steptitle">If user types "yes", run test script without AI in execution loop</text>
+  <text x="210" y="668" class="body">Runner executes setup/steps/teardown deterministically via tool functions.</text>
+  <text x="210" y="694" class="file">Module: ai_task_runner.py</text>
+  <text x="210" y="718" class="body">No LLM calls during script execution path.</text>
+  <circle cx="110" cy="722" r="18" fill="#2a9d4a"/>
+  <text x="102" y="727" class="badgeText">0</text>
+
+  <!-- Step 6 -->
+  <rect class="stepbox" x="960" y="600" width="770" height="150"/>
+  <text x="985" y="640" class="stepnum">Step 6</text>
+  <text x="1100" y="640" class="steptitle">After runner finishes, send results to AI for summary/final report</text>
+  <text x="1100" y="668" class="body">Runner passes raw results; AI summarizes and generates final markdown report.</text>
+  <text x="1100" y="694" class="file">Modules: ai_task_runner.py + ai_agent.py (_generate_ai_report)</text>
+  <text x="1100" y="718" class="body">Report saved under report/report_*/report_*.md</text>
+  <circle cx="1000" cy="722" r="18" fill="#d62828"/>
+  <text x="984" y="727" class="badgeText">TOKEN</text>
+
+  <!-- Flow arrows -->
+  <path class="line" d="M850 205 L960 205" marker-end="url(#arrow)"/>
+  <path class="line" d="M1345 270 L1345 350" marker-end="url(#arrow)"/>
+  <path class="line" d="M960 425 L850 425" marker-end="url(#arrow)"/>
+  <path class="line" d="M460 500 L460 600" marker-end="url(#arrow)"/>
+  <path class="line" d="M850 675 L960 675" marker-end="url(#arrow)"/>
+
+  <text x="870" y="198" class="note">next</text>
+  <text x="1358" y="318" class="note">next</text>
+  <text x="870" y="418" class="note">next</text>
+  <text x="474" y="555" class="note">next</text>
+  <text x="870" y="668" class="note">next</text>
+
+  <!-- Huge cost mark -->
+  <rect x="70" y="770" width="1660" height="80" fill="#effaf1" stroke="#2a9d4a" stroke-width="4" rx="14" ry="14"/>
+  <text x="110" y="820" class="bigCost">MOST TESTS COST &lt;= $0.01 EACH</text>
+  <text x="900" y="820" class="bigCostSub">(Step 5 = 0 token, so rounds do not materially increase token cost)</text>
+
+</svg>

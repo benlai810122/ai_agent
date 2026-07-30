@@ -2,6 +2,7 @@ open_ai_key.yaml
 report/
 test_assets/driver/
 test_scripts/
+test_assets/issue_example/
 __pycache__/
 *.pyc
 

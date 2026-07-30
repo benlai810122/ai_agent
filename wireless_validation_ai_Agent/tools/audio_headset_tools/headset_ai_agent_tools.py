@@ -356,20 +356,31 @@ def record_audio_output(save_path: str, duration: int = 10, device_name: str = "
             }
 
         sample_rate = 48000
-        # Get the default speaker for loopback recording
-        default_speaker = sc.default_speaker()
-        if default_speaker is None:
+
+        # Try to find the target speaker by device_name, fall back to default speaker.
+        target_speaker = None
+        if device_name:
+            search = device_name.lower()
+            for spk in sc.all_speakers():
+                if search in spk.name.lower():
+                    target_speaker = spk
+                    break
+
+        if target_speaker is None:
+            target_speaker = sc.default_speaker()
+
+        if target_speaker is None:
             return {
                 "status": "no_speaker",
-                "message": "No default audio output device found.",
+                "message": "No audio output device found.",
             }
 
-        # Record via loopback (captures what's playing through speakers/headset)
-        mic = sc.get_microphone(id=str(default_speaker.name), include_loopback=True)
+        # Record via loopback (captures what's playing through the target device)
+        mic = sc.get_microphone(id=str(target_speaker.name), include_loopback=True)
         if mic is None:
             return {
                 "status": "loopback_unavailable",
-                "message": f"Could not open loopback device for '{default_speaker.name}'.",
+                "message": f"Could not open loopback device for '{target_speaker.name}'.",
             }
 
         num_frames = sample_rate * duration
@@ -395,7 +406,7 @@ def record_audio_output(save_path: str, duration: int = 10, device_name: str = "
             "file_size_bytes": file_size,
             "sample_rate": sample_rate,
             "channels": 2,
-            "device_tested": device_name if device_name else default_speaker.name,
+            "device_tested": device_name if device_name else target_speaker.name,
         }
     except Exception as e:
         return {"error": str(e)}

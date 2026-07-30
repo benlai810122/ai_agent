@@ -160,27 +160,140 @@ def check_bluetooth_connection_status(device_name: str = "", address: str = "") 
 
 def reconnect_bluetooth_via_ui(device_name: str) -> dict:
     """Reconnect a paired Bluetooth device by automating the Windows Bluetooth Settings UI.
-    Opens Bluetooth settings, uses Windows UI Automation to find and click the Connect button, and verifies connection."""
+    If already connected, disconnects first then reconnects. Opens Bluetooth settings, uses Windows UI Automation 
+    to find and click the appropriate button (Disconnect if connected, then Connect), and verifies connection."""
     try:
         import subprocess
         import pyautogui
 
         steps_log = []
 
+        # Step 0: Check initial connection status
+        initial_status = check_bluetooth_connection_status(device_name=device_name)
+        is_already_connected = False
+        if initial_status.get("status") == "success":
+            for dev in initial_status.get("devices", []):
+                if dev.get("connected", False):
+                    is_already_connected = True
+                    break
+        
+        if is_already_connected:
+            steps_log.append(f"Device '{device_name}' is already connected. Will disconnect and reconnect.")
+        else:
+            steps_log.append(f"Device '{device_name}' is not connected. Will connect.")
+
         # Step 1: Open Bluetooth & Devices settings
         subprocess.Popen(['start', 'ms-settings:bluetooth'], shell=True)
-        time.sleep(3)
+        time.sleep(5)
         steps_log.append("Opened Bluetooth & Devices settings")
 
         # Step 2: Bring settings window to foreground
         subprocess.run([
             'powershell', '-Command',
             '(New-Object -ComObject WScript.Shell).AppActivate("Settings")'
-        ], capture_output=True, text=True, timeout=5)
-        time.sleep(1)
+        ], capture_output=True, text=True, timeout=15)
+        time.sleep(2)
 
-        # Step 3: Use UI Automation to find the device and click Connect
-        ps_script = f'''
+        # Step 3a: If already connected, disconnect first
+        if is_already_connected:
+            ps_script_disconnect = f'''
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+
+# Find the Settings window
+$settingsCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::NameProperty, "Settings"
+)
+$settingsWin = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $settingsCondition)
+
+if (-not $settingsWin) {{
+    $settingsCondition2 = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ClassNameProperty, "ApplicationFrameWindow"
+    )
+    $appWindows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $settingsCondition2)
+    foreach ($w in $appWindows) {{
+        if ($w.Current.Name -like "*Settings*" -or $w.Current.Name -like "*Bluetooth*") {{
+            $settingsWin = $w
+            break
+        }}
+    }}
+}}
+
+if (-not $settingsWin) {{
+    Write-Output "ERROR: Settings window not found"
+    exit 1
+}}
+
+# Search for all buttons in the Settings window
+$buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Button
+)
+$allButtons = $settingsWin.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+
+$disconnectButton = $null
+$textCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Text
+)
+
+# Look for a Disconnect button associated with the device name
+foreach ($btn in $allButtons) {{
+    if ($btn.Current.Name -ne "Disconnect") {{ continue }}
+
+    # Check parent and grandparent for device name text
+    $parent = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($btn)
+    if (-not $parent) {{ continue }}
+
+    foreach ($ancestor in @($parent, [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($parent))) {{
+        if (-not $ancestor) {{ continue }}
+        $textElements = $ancestor.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCondition)
+        foreach ($t in $textElements) {{
+            if ($t.Current.Name -like "*{device_name}*") {{
+                $disconnectButton = $btn
+                break
+            }}
+        }}
+        if ($disconnectButton) {{ break }}
+    }}
+    if ($disconnectButton) {{ break }}
+}}
+
+# Fallback: click the first Disconnect button found
+if (-not $disconnectButton) {{
+    foreach ($btn in $allButtons) {{
+        if ($btn.Current.Name -eq "Disconnect") {{
+            $disconnectButton = $btn
+            Write-Output "Using fallback Disconnect button"
+            break
+        }}
+    }}
+}}
+
+if ($disconnectButton) {{
+    $invokePattern = $disconnectButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    $invokePattern.Invoke()
+    Write-Output "SUCCESS: Clicked Disconnect button"
+}} else {{
+    Write-Output "WARNING: No Disconnect button found (device may not be connected)"
+}}
+'''
+            result = subprocess.run(
+                ['powershell', '-Command', ps_script_disconnect],
+                capture_output=True, text=True, timeout=30
+            )
+
+            ps_output = result.stdout.strip()
+            steps_log.append(f"Disconnect UI Automation: {ps_output}")
+            
+            # Wait for disconnection
+            time.sleep(5)
+            steps_log.append("Waited 5 seconds for disconnection")
+
+        # Step 3b: Now look for and click Connect button
+        ps_script_connect = f'''
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
@@ -265,12 +378,12 @@ if ($connectButton) {{
 }}
 '''
         result = subprocess.run(
-            ['powershell', '-Command', ps_script],
+            ['powershell', '-Command', ps_script_connect],
             capture_output=True, text=True, timeout=30
         )
 
         ps_output = result.stdout.strip()
-        steps_log.append(f"UI Automation: {ps_output}")
+        steps_log.append(f"Connect UI Automation: {ps_output}")
 
         if "SUCCESS" not in ps_output:
             pyautogui.hotkey('alt', 'F4')

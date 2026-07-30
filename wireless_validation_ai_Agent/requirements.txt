@@ -8,3 +8,7 @@ pygetwindow
 uiautomation
 pynput
 psutil
+Pillow
+soundcard
+numpy
+scipy

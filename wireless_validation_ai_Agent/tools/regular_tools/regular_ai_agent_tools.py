@@ -2,11 +2,29 @@ import os
 import subprocess
 import platform
 import webbrowser
+import time
 from urllib.parse import urlparse
 from datetime import datetime
 
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Set ROOT_DIR to project root (up 2 levels from tools/regular_tools/)
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+def delay(seconds: float) -> dict:
+    """Pause execution for a specified number of seconds. Useful to add delays between test steps to allow systems to stabilize."""
+    if not isinstance(seconds, (int, float)):
+        return {"error": f"seconds must be a number, got {type(seconds).__name__}"}
+    if seconds < 0:
+        return {"error": "seconds must be non-negative"}
+    if seconds > 300:
+        return {"error": "seconds must not exceed 300 (5 minutes)"}
+    
+    time.sleep(seconds)
+    return {
+        "status": "success",
+        "message": f"Paused for {seconds} second(s)",
+        "seconds_delayed": seconds,
+    }
 
 def get_current_time() -> dict:
     """Get the current date and time on this computer."""
@@ -185,15 +203,17 @@ def modify_file(file_path: str, old_text: str, new_text: str) -> dict:
 
 
 def create_report_folder() -> dict:
-    """Create the report folder if it does not exist."""
+    """Create a timestamped report folder under the project root."""
     try:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        report_dir = os.path.join(base_dir, "report")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_root = os.path.join(ROOT_DIR, "report")
+        report_dir = os.path.join(report_root, f"report_{stamp}")
         already_exists = os.path.isdir(report_dir)
         os.makedirs(report_dir, exist_ok=True)
         return {
             "status": "success",
             "folder_path": os.path.abspath(report_dir),
+            "report_root": os.path.abspath(report_root),
             "created": not already_exists,
         }
     except Exception as e:
@@ -657,6 +677,7 @@ def report_cycle_result(cycle_number: int, result: str, summary: str) -> dict:
 
 # Map of function name -> callable
 TOOL_FUNCTIONS = {
+    "delay": delay,
     "get_current_time": get_current_time,
     "get_system_info": get_system_info,
     "get_laptop_info": get_laptop_info,
@@ -679,10 +700,24 @@ TOOL_FUNCTIONS = {
     "report_cycle_result": report_cycle_result,
 }
 
-TOOLS = [get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, open_website, open_local_file, close_local_file_process, close_media_player]
+TOOLS = [delay, get_current_time, get_system_info, get_laptop_info, list_directory, run_shell_command, read_file_content, create_file, delete_file, write_file, modify_file, create_report_folder, capture_screen, open_website, open_local_file, close_local_file_process, close_media_player]
 
 # Anthropic-compatible tool definitions
 ANTHROPIC_TOOLS = [
+    {
+        "name": "delay",
+        "description": "Pause execution for a specified number of seconds. Use this to add delays between test steps to allow systems (like UI windows, file writes, or Bluetooth connections) to stabilize. Recommended between UI automation steps, after file I/O operations, or after hardware changes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "seconds": {
+                    "type": "number",
+                    "description": "Number of seconds to pause (float or int). Must be between 0 and 300 (5 minutes). Typical delays: 1-2 for UI window loading, 2-3 for Bluetooth state changes, 1-2 for file I/O operations."
+                }
+            },
+            "required": ["seconds"],
+        },
+    },
     {
         "name": "get_current_time",
         "description": "Get the current date and time on this computer. Returns a human-readable 'datetime' string plus an epoch 'timestamp' (float). Use the 'timestamp' value when a tool requires an epoch start_time (e.g. copy_wrt_log_to_file).",

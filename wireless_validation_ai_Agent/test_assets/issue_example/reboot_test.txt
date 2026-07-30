@@ -1,4 +1,0 @@
-step1: reboot the laptop
-step2: turn off the BT function
-step3: turn on the BT function
-step4: check the laptop BT still working well

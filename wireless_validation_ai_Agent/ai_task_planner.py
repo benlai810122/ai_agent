@@ -279,8 +279,27 @@ def generate_test_script(
         f"{excluded_rule}"
         "- For save paths (screenshots, recordings, etc.), use the real report "
         "folder path from the runtime context above when available.\n"
+        "- Never hardcode save paths under tools/regular_tools/report; that is a "
+        "legacy location.\n"
         "- Give reasonable, concrete values for every required parameter.\n"
         "- Order the steps so they accomplish the task.\n"
+        "- For conditional logic use this step format instead of a plain function step:\n"
+        '  {"if": {"function": "<tool>", "arguments": {...}, "condition": "<expr>"}, '
+        '"then": [<steps>], "else": [<steps>]}\n'
+        "  The 'if' tool is called first; its result is evaluated against 'condition'.\n"
+        "  Condition expression syntax:\n"
+        "    status == success    has_output == true    connected == true\n"
+        "    error                ok                    NOT error\n"
+        "    A AND B              A OR B\n"
+        "    devices[0].connected == true   (dot/index notation for nested fields)\n"
+        "  Both 'then' and 'else' may be empty arrays [].\n"
+        "  Example — reconnect only when not already connected:\n"
+        '  {"if": {"function": "check_bluetooth_connection_status", '
+        '"arguments": {"device_name": "Dell WL5024"}, '
+        '"condition": "devices[0].connected == true"}, '
+        '"then": [], '
+        '"else": [{"function": "reconnect_bluetooth_via_ui", "arguments": {"device_name": "Dell WL5024"}}, '
+        '{"function": "delay", "arguments": {"seconds": 5}}]}\n'
         "- Output ONLY the JSON object, with no extra text."
     )
 
@@ -295,11 +314,30 @@ def generate_test_script(
         return None, None
 
     def _clean(raw_steps):
-        """Keep only known tools; drop load_skill and excluded tools."""
+        """Keep only known tools; drop load_skill and excluded tools. Handles conditional steps."""
         cleaned = []
         for item in raw_steps if isinstance(raw_steps, list) else []:
             if not isinstance(item, dict):
                 continue
+            # Conditional step: {"if": {...}, "then": [...], "else": [...]}
+            if "if" in item:
+                if_spec = item.get("if") or {}
+                if not isinstance(if_spec, dict):
+                    continue
+                if_fn = str(if_spec.get("function", "")).strip()
+                if if_fn not in tools_by_name:
+                    continue
+                cleaned.append({
+                    "if": {
+                        "function": if_fn,
+                        "arguments": if_spec.get("arguments") or {},
+                        "condition": str(if_spec.get("condition", "ok")),
+                    },
+                    "then": _clean(item.get("then") or []),
+                    "else": _clean(item.get("else") or []),
+                })
+                continue
+            # Normal step
             fname = str(item.get("function", "")).strip()
             fargs = item.get("arguments", {})
             if not isinstance(fargs, dict):
@@ -336,12 +374,47 @@ def generate_test_script(
     return script_obj, file_path
 
 
-def _render_steps(parts, steps) -> None:
-    """Append a numbered `tool(args)` list for the given steps."""
-    for i, step in enumerate(steps, 1):
+def _format_tool_call(function_name: str, arguments: dict) -> str:
+    """Render a tool call as `name(arg=value, ...)` for markdown display."""
+    args = arguments if isinstance(arguments, dict) else {}
+    arg_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+    name = function_name or "<invalid-step>"
+    return f"`{name}({arg_str})`"
+
+
+def _render_steps(parts, steps, indent: str = "") -> None:
+    """Append a numbered tool-step list, including conditional branches."""
+    for i, step in enumerate(steps if isinstance(steps, list) else [], 1):
+        if not isinstance(step, dict):
+            continue
+
+        # Conditional step format:
+        # {"if": {"function", "arguments", "condition"}, "then": [...], "else": [...]}.
+        if "if" in step:
+            if_spec = step.get("if") or {}
+            if not isinstance(if_spec, dict):
+                continue
+            if_fn = str(if_spec.get("function", "")).strip()
+            if_args = if_spec.get("arguments") or {}
+            condition = str(if_spec.get("condition", "ok")).strip() or "ok"
+            then_steps = step.get("then") or []
+            else_steps = step.get("else") or []
+
+            parts.append(
+                f"{indent}{i}. **IF** {_format_tool_call(if_fn, if_args)} "
+                f"with condition `{condition}`\n"
+            )
+            parts.append(f"{indent}   - THEN ({len(then_steps)} step(s))\n")
+            if then_steps:
+                _render_steps(parts, then_steps, indent=f"{indent}     ")
+            parts.append(f"{indent}   - ELSE ({len(else_steps)} step(s))\n")
+            if else_steps:
+                _render_steps(parts, else_steps, indent=f"{indent}     ")
+            continue
+
+        function_name = str(step.get("function", "")).strip()
         args = step.get("arguments", {})
-        arg_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-        parts.append(f"{i}. `{step.get('function')}({arg_str})`\n")
+        parts.append(f"{indent}{i}. {_format_tool_call(function_name, args)}\n")
 
 
 def format_plan_for_reply(

@@ -243,9 +243,14 @@ def _generate_ai_report(run_data: dict) -> str:
     """
     skill = SKILLS.get("report-format")
     skill_body = skill["body"] if skill else ""
+    report_folder = run_data.get("report_folder") or "(unknown)"
     prompt = (
         "You are writing the FINAL test report for a test run that has already "
         "finished. Do NOT call any tools — just write the report text.\n\n"
+        "A report output folder is already prepared by the runner, and the final "
+        "markdown will be saved there automatically. Do NOT create a new folder "
+        "or suggest alternate save locations.\n"
+        f"Existing report folder: {report_folder}\n\n"
         "Follow these report-format rules exactly:\n"
         f"{skill_body}\n\n"
         "Here is the raw run data (per-round step results and any error messages). "
@@ -256,7 +261,7 @@ def _generate_ai_report(run_data: dict) -> str:
         f"Test end time: {run_data.get('end_time'):%Y-%m-%d %H:%M:%S}\n\n"
         "Write the complete final report in Markdown. Include the required sections "
         "in order (Test Item, Test Result, Summary), plus Test Start Time and Test "
-        "End Time, and a Test Error Happened Time section if any step failed. "
+        "End Time, and a Test Error Happened Time section if any step faihihled. "
         "Summarize the rounds and clearly call out any failures with their error "
         "messages. Output ONLY the report markdown, no extra commentary."
     )
