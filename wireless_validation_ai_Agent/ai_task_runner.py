@@ -14,6 +14,13 @@ import json
 import re
 from datetime import datetime
 
+# Optional Echo MCP analysis. If the module or the Echo server is unavailable
+# (e.g. off-VPN), the runner degrades gracefully and skips the analysis step.
+try:
+    from ai_echo_mcp_api import analyze_test_result
+except Exception:  # pragma: no cover - Echo integration is optional
+    analyze_test_result = None
+
 
 def _short(value, limit: int = 400) -> str:
     """Compact single-line rendering of a tool result for logs."""
@@ -32,13 +39,35 @@ def _emit(step_callback, print_logs: bool, text: str) -> None:
             pass
 
 
+# Statuses that tools return to signal a successful or otherwise benign outcome.
+# ANY other status (e.g. "not_found", "device_not_found", "connection_uncertain",
+# "connect_button_not_found", "timeout", "module_missing", …) is treated as a
+# failure so that soft failures are not silently reported as PASS.
+_SUCCESS_STATUSES = frozenset({
+    "success", "ok", "okay", "pass", "passed", "complete", "completed", "done",
+    "skipped", "connected", "enabled", "acknowledged",
+    "already_in_desired_state", "no_tasks", "warning",
+})
+
+
+def _has_hard_error(result) -> bool:
+    """True only if the tool raised/returned a hard error (has an ``error`` key)."""
+    return isinstance(result, dict) and bool(result.get("error"))
+
+
 def _is_failure(result) -> bool:
-    """A step failed if the tool reported an error or a failure status."""
+    """A step failed if the tool reported an error or a non-success status.
+
+    Only statuses in ``_SUCCESS_STATUSES`` are considered passing; every other
+    status counts as a failure. This ensures soft-failure statuses such as
+    ``not_found`` or ``device_not_found`` (e.g. a Bluetooth/audio device that
+    does not exist) correctly fail the test instead of being reported as PASS.
+    """
     if isinstance(result, dict):
         if result.get("error"):
             return True
-        status = str(result.get("status", "")).lower()
-        if status in ("failure", "error", "fail", "failed"):
+        status = str(result.get("status", "")).strip().lower()
+        if status and status not in _SUCCESS_STATUSES:
             return True
     return False
 
@@ -255,6 +284,7 @@ def run_test_script(
     write_report: bool = True,
     script_dir: str | None = None,
     report_generator=None,
+    echo_analyze: bool = True,
 ) -> str:
     """Execute a planned test script for one or more rounds by calling tool funcs.
 
@@ -274,6 +304,10 @@ def run_test_script(
             If provided, the AI (or any writer) produces the final report content
             from the collected run data (per-round results + errors). On failure
             or empty output the deterministic report is used instead.
+        echo_analyze: when True, send the raw result to the Echo MCP server for
+            an independent analysis first, and pass that analysis to the report
+            generator (under run_data["echo_analysis"]). Skipped gracefully if
+            Echo is unavailable.
     """
     setup = script.get("setup", []) if isinstance(script, dict) else []
     steps = script.get("steps", []) if isinstance(script, dict) else []
@@ -387,6 +421,26 @@ def run_test_script(
             rounds,
             stamp,
         )
+
+        # Ask Echo MCP to analyze the raw result BEFORE the AI writes the report,
+        # so the report generator can use both the results and Echo's analysis.
+        echo_analysis = None
+        if echo_analyze and analyze_test_result is not None:
+            _emit(
+                step_callback,
+                print_logs,
+                "[Runner] Sending result to Echo MCP for analysis\u2026",
+            )
+            try:
+                echo_analysis = analyze_test_result(raw_report)
+                _emit(step_callback, print_logs, "[Runner] Echo analysis received.")
+            except Exception as e:  # noqa: BLE001
+                _emit(
+                    step_callback,
+                    print_logs,
+                    f"[Runner] Echo analysis skipped ({e}).",
+                )
+
         run_data = {
             "task": task,
             "rounds": rounds,
@@ -399,9 +453,12 @@ def run_test_script(
             "round_results": round_results,
             "teardown_results": teardown_results,
             "raw_report": raw_report,
+            "echo_analysis": echo_analysis,
         }
 
         content = raw_report
+        if echo_analysis:
+            content = f"{raw_report}\n\n## Echo MCP Analysis\n\n{echo_analysis}\n"
         if report_generator:
             _emit(
                 step_callback,
@@ -538,7 +595,10 @@ def _execute_steps(
                 "function": f"[IF] {if_fn}",
                 "arguments": effective_if_args,
                 "result": if_result,
-                "ok": not _is_failure(if_result),
+                # A conditional CHECK only fails on a hard error; a soft status
+                # like "not_found" is an expected outcome that the THEN/ELSE
+                # branch is responsible for handling.
+                "ok": not _has_hard_error(if_result),
                 "branch": branch_label,
                 "condition": condition_str,
             })

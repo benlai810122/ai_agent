@@ -110,3 +110,108 @@ def make_script_context_gatherer(
         return "\n".join(gathered).strip()
 
     return gather_context
+
+
+def make_openai_script_context_gatherer(
+    *,
+    call_llm,
+    tools,
+    tool_functions,
+    system_prompt=None,
+    tool_names=DEFAULT_SCRIPT_CONTEXT_TOOLS,
+    step_callback=None,
+    max_rounds=6,
+):
+    """Build a gather_context(instruction) -> str callable bound to an OpenAI/LM Studio API.
+
+    Mirrors ``make_script_context_gatherer`` but speaks the OpenAI "tools"
+    (function-calling) message shape used by LM Studio instead of the Anthropic
+    content-block shape, so the LM Studio agent (test_lmstudio_agent.py) can reuse
+    the exact same context-gathering step during test-script generation.
+
+    Runs a short tool-enabled loop restricted to ``tool_names``, executing them via
+    ``tool_functions``, and returns a plain-text summary of the facts gathered.
+
+    Injected dependencies:
+      - call_llm(messages, tools) -> message dict: send the conversation plus a
+        tool subset to the model and return the raw assistant message (with an
+        optional "tool_calls" list).
+      - tools: full tool-schema list (OpenAI format); filtered to ``tool_names``.
+      - tool_functions: {name: callable} used to actually run the info tools.
+      - system_prompt: optional system message prepended to the conversation.
+      - step_callback: optional sink for live progress lines (console + web UI).
+    """
+    info_tools = [
+        t for t in tools if t.get("function", {}).get("name") in tool_names
+    ]
+
+    def gather_context(instruction: str) -> str:
+        if not info_tools:
+            return ""
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": instruction})
+        gathered: list[str] = []
+
+        for _ in range(max_rounds):
+            message = call_llm(messages, tools=info_tools)
+            tool_calls = message.get("tool_calls") or []
+
+            if not tool_calls:
+                final = (message.get("content") or "").strip()
+                if not final:
+                    final = (message.get("reasoning_content") or "").strip()
+                if final:
+                    gathered.append(final)
+                break
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": message.get("content") or "",
+                    "tool_calls": tool_calls,
+                }
+            )
+
+            for call in tool_calls:
+                fn = call.get("function", {})
+                name = fn.get("name", "")
+                raw_args = fn.get("arguments") or "{}"
+                try:
+                    args = (
+                        json.loads(raw_args)
+                        if isinstance(raw_args, str)
+                        else raw_args
+                    )
+                except json.JSONDecodeError:
+                    args = {}
+
+                impl = tool_functions.get(name)
+                try:
+                    result = impl(**args) if impl else {"error": "unknown tool"}
+                except Exception as e:  # noqa: BLE001
+                    result = {"error": str(e)}
+
+                gathered.append(
+                    f"{name}({json.dumps(args, default=str)}) -> "
+                    f"{json.dumps(result, default=str)}"
+                )
+                if step_callback:
+                    try:
+                        step_callback(f"[Context] {name} -> gathered")
+                    except Exception:
+                        pass
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id", ""),
+                        "content": json.dumps(result, default=str),
+                    }
+                )
+
+        return "\n".join(gathered).strip()
+
+    return gather_context

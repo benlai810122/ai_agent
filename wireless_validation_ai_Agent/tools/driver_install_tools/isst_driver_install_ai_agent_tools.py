@@ -1,5 +1,35 @@
 import os
+import re
 import subprocess
+
+
+def _extract_driver_version(text: str):
+    """Pull the dotted version token (e.g. 20.40.12741.9) out of a pnputil value."""
+    m = re.search(r"\d+\.\d+\.\d+\.\d+", text or "")
+    return m.group(0) if m else None
+
+
+def _version_key(version: str):
+    """Numeric sort key so 20.40.12741.9 ranks above 3.1.2.6 (not lexicographically)."""
+    return tuple(int(part) for part in version.split("."))
+
+
+def _is_admin() -> bool:
+    """Return True if the current process is running with Administrator rights."""
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+_NOT_ADMIN_HINT = (
+    "The agent process is not running as Administrator, so pnputil cannot add or "
+    "remove drivers (Access is denied). Relaunch the agent via 'Launch Agent.bat' "
+    "and accept the UAC prompt (or start web_ui.py from an elevated terminal). "
+    "Running 'python web_ui.py' from a normal terminal is NOT elevated."
+)
 
 
 def install_isst_driver(inf_path: str) -> dict:
@@ -18,6 +48,9 @@ def install_isst_driver(inf_path: str) -> dict:
         if not os.path.isfile(inf_path):
             return {"error": f"INF file not found: {inf_path}"}
 
+        if not _is_admin():
+            return {"status": "failed", "error": _NOT_ADMIN_HINT}
+
         # Use pnputil to add and install the driver
         result = subprocess.run(
             ["pnputil", "/add-driver", inf_path, "/install"],
@@ -29,10 +62,26 @@ def install_isst_driver(inf_path: str) -> dict:
         output = result.stdout.strip()
         err_output = result.stderr.strip()
 
+        # pnputil returns 259 (ERROR_NO_MORE_ITEMS) when the package is already
+        # present / up-to-date on the device and nothing new was added. The driver
+        # is effectively installed, so treat that as success rather than a failure.
+        already_present = (
+            result.returncode == 259
+            or "already exists" in output.lower()
+            or "up-to-date" in output.lower()
+        )
+
         if result.returncode == 0:
             return {
                 "status": "success",
                 "message": "ISST driver installed successfully.",
+                "output": output,
+            }
+        elif already_present:
+            return {
+                "status": "success",
+                "message": "ISST driver already present / up-to-date on the system.",
+                "return_code": result.returncode,
                 "output": output,
             }
         else:
@@ -45,6 +94,85 @@ def install_isst_driver(inf_path: str) -> dict:
             }
     except subprocess.TimeoutExpired:
         return {"error": "Driver installation timed out after 120 seconds."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def install_all_isst_drivers(driver_folder: str, recursive: bool = True) -> dict:
+    """Install EVERY ``.inf`` file found under a driver folder using pnputil.
+
+    This is the reliable way to satisfy "install ALL .inf files" — instead of
+    listing each INF name by hand (which is error-prone and easy to leave
+    incomplete), point this at a version's driver folder and it discovers and
+    installs every ``.inf`` automatically. By default it searches subfolders too,
+    so both ``Drivers`` and ``Extensions`` INFs under the folder are included.
+
+    Args:
+        driver_folder: Path to the folder containing the ``.inf`` files (e.g. the
+            version's ``Production`` or ``QS_Cert`` folder, or its ``Drivers``
+            subfolder).
+        recursive: When True (default), also install ``.inf`` files in nested
+            subfolders (e.g. ``Extensions/OemExtensionInfs/...``).
+
+    Returns:
+        A dict with an overall status plus per-file installation results.
+    """
+    try:
+        if not driver_folder or not isinstance(driver_folder, str):
+            return {"error": "A valid driver_folder path must be provided."}
+
+        if not os.path.isdir(driver_folder):
+            return {"error": f"Driver folder not found: {driver_folder}"}
+
+        if not _is_admin():
+            return {"status": "failed", "error": _NOT_ADMIN_HINT}
+
+        # Discover every .inf under the folder.
+        inf_paths = []
+        if recursive:
+            for root, _dirs, files in os.walk(driver_folder):
+                for name in files:
+                    if name.lower().endswith(".inf"):
+                        inf_paths.append(os.path.join(root, name))
+        else:
+            for name in os.listdir(driver_folder):
+                full = os.path.join(driver_folder, name)
+                if os.path.isfile(full) and name.lower().endswith(".inf"):
+                    inf_paths.append(full)
+
+        inf_paths.sort()
+
+        if not inf_paths:
+            return {
+                "status": "not_found",
+                "message": f"No .inf files found under '{driver_folder}'.",
+                "driver_folder": driver_folder,
+            }
+
+        results = []
+        installed = 0
+        for inf_path in inf_paths:
+            res = install_isst_driver(inf_path)
+            ok = res.get("status") == "success"
+            if ok:
+                installed += 1
+            results.append({
+                "inf_path": inf_path,
+                "inf_name": os.path.basename(inf_path),
+                "status": res.get("status", "error" if res.get("error") else "unknown"),
+                "message": res.get("message") or res.get("error", ""),
+            })
+
+        total = len(inf_paths)
+        overall = "success" if installed == total else "failed"
+        return {
+            "status": overall,
+            "message": f"Installed {installed}/{total} .inf file(s) from '{driver_folder}'.",
+            "driver_folder": driver_folder,
+            "total": total,
+            "installed": installed,
+            "results": results,
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -145,6 +273,9 @@ def uninstall_isst_driver(inf_name: str) -> dict:
         if not inf_name or not inf_name.lower().endswith(".inf"):
             return {"error": "A valid .inf driver name must be provided (e.g., 'oem123.inf' or 'IntcBTAu.inf')."}
 
+        if not _is_admin():
+            return {"status": "failed", "error": _NOT_ADMIN_HINT}
+
         # Resolve to published oem*.inf name(s)
         published_names = _resolve_published_names(inf_name)
 
@@ -219,6 +350,171 @@ def uninstall_isst_driver(inf_name: str) -> dict:
         return {"error": str(e)}
 
 
+# Exact original INF names that belong to the Intel SST driver package (matching
+# the .inf files shipped in the driver folders). Matching is case-insensitive.
+# An explicit allowlist is used (instead of a broad 'intc*' prefix) so unrelated
+# Intel INFs that happen to start with 'intc' are NOT removed.
+_ISST_INF_MATCHERS = (
+    "intcaudiobus.inf",
+    "intcbtau.inf",
+    "intcbtle.inf",
+    "intcdmic.inf",
+    "intcoed.inf",
+    "intcsdw.inf",
+    "intcsdwbus.inf",
+    "intcsst.inf",
+    "intcstreaming.inf",
+    "intcusb.inf",
+    "detectionverificationdrv.inf",
+    "lt6911au.inf",
+    "intelmvaextension.inf",
+)
+
+# INFs that must NEVER be removed even if they resemble ISST names. These are not
+# part of the ISST install package (e.g. OEM/platform-specific variants).
+_ISST_INF_EXCLUDE = (
+    "intc_dmicext_dell_igo.inf",
+    "intcoed_oemlibpath_cirrus.inf",
+    "intcpmt.inf",
+)
+
+
+def _matches_isst(original_name: str) -> bool:
+    """True if an original INF name belongs to the Intel SST driver package."""
+    name = (original_name or "").strip().lower()
+    if not name or name in _ISST_INF_EXCLUDE:
+        return False
+    return name in _ISST_INF_MATCHERS
+
+
+def _enum_isst_published_names() -> list[dict]:
+    """Enumerate installed ISST driver packages as [{published_name, original_name}]."""
+    result = subprocess.run(
+        ["pnputil", "/enum-drivers"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return []
+
+    matched = []
+    current = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            if current:
+                if _matches_isst(current.get("Original Name", "")) and current.get("Published Name"):
+                    matched.append({
+                        "published_name": current.get("Published Name", ""),
+                        "original_name": current.get("Original Name", ""),
+                    })
+                current = {}
+            continue
+        if ":" in line:
+            key, _, value = line.partition(":")
+            current[key.strip()] = value.strip()
+    if current:
+        if _matches_isst(current.get("Original Name", "")) and current.get("Published Name"):
+            matched.append({
+                "published_name": current.get("Published Name", ""),
+                "original_name": current.get("Original Name", ""),
+            })
+    return matched
+
+
+def uninstall_all_isst_drivers() -> dict:
+    """Uninstall EVERY installed ISST (Intel Smart Sound Technology) driver package.
+
+    Enumerates all drivers in the Windows driver store, selects those belonging to
+    the Intel SST package (INF names starting with 'intc' plus the companion
+    package INFs: DetectionVerificationDrv, LT6911Au, IntelMvaExtension) and removes
+    each with pnputil using /uninstall and /force so bound devices are also removed.
+    Deletion is then verified by re-enumerating the driver store.
+
+    Returns:
+        A dict with an overall status plus per-package uninstall results.
+    """
+    try:
+        if not _is_admin():
+            return {"status": "failed", "error": _NOT_ADMIN_HINT}
+
+        matched = _enum_isst_published_names()
+
+        if not matched:
+            return {
+                "status": "success",
+                "removed": 0,
+                "message": "No ISST driver packages are currently installed.",
+                "results": [],
+            }
+
+        published_names = [m["published_name"] for m in matched]
+        results = []
+        overall_success = True
+
+        for m in matched:
+            pub_name = m["published_name"]
+            result = subprocess.run(
+                ["pnputil", "/delete-driver", pub_name, "/uninstall", "/force"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            entry = {
+                "published_name": pub_name,
+                "original_name": m["original_name"],
+                "return_code": result.returncode,
+                "output": result.stdout.strip(),
+                "error_output": result.stderr.strip(),
+                "status": "success" if result.returncode == 0 else "failed",
+            }
+            if result.returncode != 0:
+                overall_success = False
+            results.append(entry)
+
+        # Post-deletion verification: re-enumerate to confirm removal.
+        still_present = _verify_deleted(published_names)
+        still_present_lower = [p.lower() for p in still_present]
+        for entry in results:
+            entry["verified_deleted"] = entry["published_name"].lower() not in still_present_lower
+
+        verified_failed = [r["published_name"] for r in results if not r["verified_deleted"]]
+        removed = sum(1 for r in results if r["verified_deleted"])
+
+        if not verified_failed and overall_success:
+            return {
+                "status": "success",
+                "removed": removed,
+                "message": f"All ISST driver packages uninstalled and verified deleted ({removed} removed).",
+                "results": results,
+            }
+        elif verified_failed:
+            return {
+                "status": "failed",
+                "removed": removed,
+                "message": (
+                    f"Uninstall ran but {len(verified_failed)} package(s) are still present in the "
+                    f"driver store: {verified_failed}. This usually means the process lacks "
+                    "Administrator privileges."
+                ),
+                "still_present": verified_failed,
+                "results": results,
+            }
+        else:
+            cmd_failed = [r["published_name"] for r in results if r["status"] == "failed"]
+            return {
+                "status": "failed",
+                "removed": removed,
+                "message": f"Some ISST driver packages could not be uninstalled: {cmd_failed}",
+                "results": results,
+            }
+    except subprocess.TimeoutExpired:
+        return {"error": "Driver uninstallation timed out after 120 seconds."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 
 def get_isst_driver_version() -> dict:
     """Get the currently installed ISST (Intel Smart Sound Technology) driver version.
@@ -272,13 +568,44 @@ def get_isst_driver_version() -> dict:
             return {
                 "status": "success",
                 "installed": False,
+                "version": None,
+                "versions": [],
+                "packages_count": 0,
                 "message": "No ISST driver found on this system.",
                 "drivers": [],
             }
 
+        # Normalized version tokens (date prefix stripped) for easy condition checks.
+        versions = sorted(
+            {
+                v for d in isst_drivers
+                if (v := _extract_driver_version(d.get("Driver Version", "")))
+            },
+            key=_version_key,
+        )
+
+        # The canonical ISST (Smart Sound) version is the audio-bus driver's
+        # (intcaudiobus.inf); other intc* entries (Bluetooth, etc.) use unrelated
+        # version lines and must not stand in for the SST version.
+        primary = next(
+            (
+                d for d in isst_drivers
+                if d.get("Original Name", "").lower().startswith("intcaudiobus")
+            ),
+            None,
+        )
+        primary_version = (
+            _extract_driver_version(primary.get("Driver Version", ""))
+            if primary
+            else (versions[-1] if versions else None)
+        )
+
         return {
             "status": "success",
             "installed": True,
+            "version": primary_version,
+            "versions": versions,
+            "packages_count": len(isst_drivers),
             "message": f"Found {len(isst_drivers)} ISST driver package(s).",
             "drivers": isst_drivers,
         }
@@ -309,6 +636,37 @@ ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS = [
         },
     },
     {
+        "name": "install_all_isst_drivers",
+        "description": (
+            "Install ALL .inf driver files found under a driver folder using pnputil. "
+            "Use this instead of calling install_isst_driver once per file: point it at the "
+            "version's driver folder (e.g. the 'Production' or 'QS_Cert' folder, or its 'Drivers' "
+            "subfolder) and it discovers and installs every .inf automatically. By default it "
+            "searches subfolders too, so both 'Drivers' and 'Extensions' INFs are included. "
+            "This is the reliable way to satisfy 'install all .inf files'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "driver_folder": {
+                    "type": "string",
+                    "description": (
+                        "Path to the folder containing the .inf files (e.g. the version's "
+                        "'Production' or 'QS_Cert' folder, or its 'Drivers' subfolder)."
+                    ),
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": (
+                        "When true (default), also install .inf files in nested subfolders "
+                        "such as Extensions/OemExtensionInfs."
+                    ),
+                },
+            },
+            "required": ["driver_folder"],
+        },
+    },
+    {
         "name": "uninstall_isst_driver",
         "description": (
             "Uninstall an ISST driver from the system using pnputil with /force and /uninstall flags. "
@@ -331,6 +689,22 @@ ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS = [
         },
     },
     {
+        "name": "uninstall_all_isst_drivers",
+        "description": (
+            "Uninstall ALL installed ISST (Intel Smart Sound Technology) driver packages at once. "
+            "Enumerates the Windows driver store, selects every Intel SST package driver (INF names "
+            "starting with 'intc' plus the companion INFs DetectionVerificationDrv, LT6911Au and "
+            "IntelMvaExtension) and removes each with pnputil /uninstall /force, then verifies deletion. "
+            "Use this to fully clear ISST drivers without listing each INF name by hand. Requires "
+            "Administrator privileges."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
         "name": "check_isst_driver_status",
         "description": "Check the current installation status of the ISST driver on this system.",
         "input_schema": {
@@ -345,7 +719,14 @@ ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS = [
             "Get the currently installed ISST (Intel Smart Sound Technology) driver version. "
             "Returns all installed ISST driver packages with their version numbers, published names, "
             "and other metadata. Use this to check what version is currently on the system before "
-            "deciding whether an install or upgrade is needed."
+            "deciding whether an install or upgrade is needed. "
+            "Result keys for conditions: 'status' (\"success\"), 'installed' (bool — use "
+            "'installed == false' to detect no driver), 'version' (the SST audio-bus "
+            "version string like \"20.40.12741.9\", or null when none is installed), "
+            "'versions' (list of all normalized versions found), 'packages_count' "
+            "(number of ISST driver packages installed), and 'drivers' (per-package "
+            "details). To branch on the installed version use "
+            "'version == 20.40.12741.9'."
         ),
         "input_schema": {
             "type": "object",
@@ -357,6 +738,8 @@ ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS = [
 
 ISST_DRIVER_INSTALL_TOOL_FUNCTIONS = {
     "install_isst_driver": install_isst_driver,
+    "install_all_isst_drivers": install_all_isst_drivers,
     "uninstall_isst_driver": uninstall_isst_driver,
+    "uninstall_all_isst_drivers": uninstall_all_isst_drivers,
     "get_isst_driver_version": get_isst_driver_version,
 }

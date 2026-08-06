@@ -292,6 +292,11 @@ def generate_test_script(
         "    error                ok                    NOT error\n"
         "    A AND B              A OR B\n"
         "    devices[0].connected == true   (dot/index notation for nested fields)\n"
+        "  Do NOT use parentheses. The expression is evaluated as AND-of-OR-groups: "
+        "it is split on AND first, then OR — so 'A AND B OR C' means 'A AND (B OR C)'. "
+        "Write 'status == success AND v == 1 OR v == 2' (never '(...)').\n"
+        "  Compare only against keys the 'if' tool actually returns (see its "
+        "description); do NOT invent key names.\n"
         "  Both 'then' and 'else' may be empty arrays [].\n"
         "  Example — reconnect only when not already connected:\n"
         '  {"if": {"function": "check_bluetooth_connection_status", '

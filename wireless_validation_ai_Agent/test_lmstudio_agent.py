@@ -1,13 +1,24 @@
 """
-Standalone minimal tool-using AGENT demo for a self-hosted LM Studio LLM.
+Standalone tool-using AGENT for a self-hosted LM Studio LLM.
 
-This script is completely independent from the rest of the project. It shows
-the core idea of an AI agent: the LLM is the "brain" that decides which tool
-to call, sees the result, and decides the next step until it can answer.
+This script mirrors the structure and flow of ai_agent.py, but is bound to a
+self-hosted LM Studio model (OpenAI-compatible "tools" / function-calling API)
+instead of the Anthropic backend. It reuses the SAME shared modules as the main
+agent so both stay in lockstep:
 
-It uses the OpenAI-compatible "tools" (function calling) API that LM Studio
-exposes. If the model does not natively support tool calls, see the notes at
-the bottom about the JSON/ReAct fallback approach.
+    ai_skills_loader  – skill discovery + progressive-disclosure load_skill tool
+    ai_task_planner   – plan skills/tools/flow and generate a runnable JSON script
+    ai_agent_backend  – gather real runtime context before the script is written
+    ai_task_runner    – deterministically execute a confirmed script (no LLM cost)
+
+Flow (identical to ai_agent.py):
+    1. A test/validation request is detected.
+    2. The planner picks skills + tools, outlines a one-round flow, and turns it
+       into a concrete JSON test script (using real gathered runtime context).
+    3. The plan + script are shown and the user is asked to confirm.
+    4. On "yes" the script is executed deterministically by ai_task_runner; the
+       final report is written following the report-format skill.
+    Non-test messages fall through to a normal tool-using chat loop.
 
 Server info:
     Model : google/gemma-4-12b-qat
@@ -18,22 +29,34 @@ Usage:
     python test_lmstudio_agent.py
 
 Requirements:
-    pip install requests
+    pip install requests pyyaml
 """
 
-import sys
 import os
 import re
 import json
-from datetime import datetime
 
 import requests
-import yaml
 
-from ai_task_planner import (
-    select_tools_for_task as _plan_select_tools,
-    generate_test_script as _plan_generate_script,
+# Shared modules — the SAME ones ai_agent.py uses, so the LM Studio agent and the
+# Anthropic agent share one planning/scripting/running/skill implementation.
+from ai_skills_loader import (
+    discover_skills,
+    build_skill_catalog,
+    make_load_skill,
+    LOAD_SKILL_TOOL as LOAD_SKILL_TOOL_ANTHROPIC,
 )
+from ai_task_planner import (
+    build_tool_catalog,
+    select_tools_for_task as _select_tools_for_task,
+    generate_test_script as _generate_test_script,
+    format_plan_for_reply,
+)
+from ai_agent_backend import (
+    make_openai_script_context_gatherer,
+    DEFAULT_SCRIPT_CONTEXT_TOOLS,
+)
+from ai_task_runner import run_test_script
 
 # Import all tool schemas + implementations from the existing tools/ folder.
 # Each module exposes X_ANTHROPIC_TOOLS (list of Anthropic-format schemas) and
@@ -103,95 +126,21 @@ REQUEST_TIMEOUT = (30, 180)
 
 MAX_STEPS = 100  # safety cap so the agent loop can never run forever
 
-
-# ---------------------------------------------------------------------------
-# Skills (progressive disclosure), mirrored from ai_agent.py
-# Only each skill's name + description is always in the system prompt. The full
-# body is loaded ON DEMAND via the load_skill tool.
-# ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(SCRIPT_DIR, "skills")
 
+# ---------------------------------------------------------------------------
+# Skills (progressive disclosure) — discovered by the shared ai_skills_loader.
+# Only each skill's name + description is always in the system prompt; the full
+# body is loaded ON DEMAND via the load_skill tool.
+# ---------------------------------------------------------------------------
+SKILLS = discover_skills(SKILLS_DIR)
 
-def _parse_skill_file(file_path: str):
-    """Parse a SKILL.md file into {name, description, body}."""
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except OSError:
-        return None
+# Bind the discovered skills to the load_skill tool implementation.
+load_skill = make_load_skill(SKILLS)
 
-    if not content.lstrip().startswith("---"):
-        return None
-
-    stripped = content.lstrip()
-    parts = stripped.split("---", 2)
-    if len(parts) < 3:
-        return None
-
-    frontmatter_raw, body = parts[1], parts[2]
-    try:
-        meta = yaml.safe_load(frontmatter_raw) or {}
-    except yaml.YAMLError:
-        return None
-
-    name = str(meta.get("name", "")).strip()
-    description = str(meta.get("description", "")).strip()
-    if not name:
-        return None
-
-    return {"name": name, "description": description, "body": body.strip()}
-
-
-def _discover_skills() -> dict:
-    """Recursively scan SKILLS_DIR for all SKILL.md files -> {name: skill}."""
-    skills: dict = {}
-    if not os.path.isdir(SKILLS_DIR):
-        return skills
-    for root, dirnames, filenames in os.walk(SKILLS_DIR):
-        dirnames.sort()
-        for filename in sorted(filenames):
-            if filename != "SKILL.md":
-                continue
-            parsed = _parse_skill_file(os.path.join(root, filename))
-            if parsed:
-                skills[parsed["name"]] = parsed
-    return skills
-
-
-# Load all available skills once at startup.
-SKILLS = _discover_skills()
-
-
-def _build_skill_catalog() -> str:
-    """Always-on catalog text listing each skill name + description."""
-    if not SKILLS:
-        return "No skills are currently available."
-    lines = []
-    for skill in SKILLS.values():
-        desc = " ".join(skill["description"].split())
-        lines.append(f"- {skill['name']}: {desc}")
-    return "\n".join(lines)
-
-
-def load_skill(name: str) -> dict:
-    """Tool: return the full instructions (body) for a named skill."""
-    skill = SKILLS.get(name)
-    if not skill:
-        available = ", ".join(SKILLS.keys()) or "(none)"
-        return {
-            "status": "error",
-            "error": f"Unknown skill '{name}'. Available skills: {available}",
-        }
-    return {
-        "status": "success",
-        "name": skill["name"],
-        "instructions": skill["body"],
-    }
-
-
-# System prompt mirrored from ai_agent.py's BASE_SYSTEM_INSTRUCTION, now including
-# the Skills section so the model knows to load a skill before matching tasks.
+# System prompt mirrored from ai_agent.py's BASE_SYSTEM_INSTRUCTION, including the
+# always-on skill catalog so the model knows to load a skill before matching tasks.
 SYSTEM_PROMPT = (
     "You are a helpful AI assistant running on the user's laptop. "
     "You have access to tools that let you interact with the local system. "
@@ -200,7 +149,8 @@ SYSTEM_PROMPT = (
     "Always attempt to execute every test step automatically using the available tools. "
     "Do NOT ask the user to perform steps manually unless there is truly no tool or equivalent method available. "
     "When calling tools, always provide ALL required parameters. "
-    "Answer clearly and concisely.\n\n"
+    "Answer clearly and concisely. "
+    f"Your program is located at: {SCRIPT_DIR}\n\n"
     "## Skills\n"
     "You have specialized skills available. Each skill contains detailed step-by-step "
     "instructions for a domain. The full instructions are NOT loaded yet — only the "
@@ -209,7 +159,7 @@ SYSTEM_PROMPT = (
     "them. You may load multiple skills if a task spans several domains. Do not guess "
     "the detailed steps — always load the relevant skill first.\n\n"
     "Available skills:\n"
-    
+    f"{build_skill_catalog(SKILLS)}\n"
 )
 
 
@@ -280,51 +230,43 @@ def anthropic_to_openai_tool(anthropic_tool: dict) -> dict:
 
 # The full tool list in OpenAI/LM Studio format, plus a name -> schema lookup.
 TOOLS = [anthropic_to_openai_tool(t) for t in ALL_ANTHROPIC_TOOLS]
-TOOLS_BY_NAME = {t["function"]["name"]: t for t in TOOLS}
 
-# Register the load_skill tool alongside the regular tools so the agent can pull
-# in a skill's full instructions on demand.
-LOAD_SKILL_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "load_skill",
-        "description": (
-            "Load the full detailed instructions for one of the available skills. "
-            "Call this BEFORE performing a task that matches a skill, using the exact "
-            "skill name from the 'Available skills' list. Returns the skill's full "
-            "step-by-step instructions."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "The exact skill name to load (e.g. 'bluetooth-validation').",
-                }
-            },
-            "required": ["name"],
-        },
-    },
-}
+# Register the load_skill tool (converted from the shared Anthropic schema) so the
+# agent can pull in a skill's full instructions on demand.
+LOAD_SKILL_TOOL = anthropic_to_openai_tool(LOAD_SKILL_TOOL_ANTHROPIC)
 TOOLS.append(LOAD_SKILL_TOOL)
-TOOLS_BY_NAME["load_skill"] = LOAD_SKILL_TOOL
 TOOL_IMPLEMENTATIONS["load_skill"] = load_skill
 
-# A compact catalog (name + description only) used ONLY for the selection phase.
-# This is cheap to send because it omits the full parameter schemas.
-TOOL_CATALOG = "\n".join(
-    f"- {t['function']['name']}: {t['function']['description']}" for t in TOOLS
-)
+TOOLS_BY_NAME = {t["function"]["name"]: t for t in TOOLS}
 
 
 # ---------------------------------------------------------------------------
-# 3. Low-level call to the LLM
+# 3. Tool-schema accessors (OpenAI/LM Studio shape) + compact catalog.
+# ---------------------------------------------------------------------------
+def _get_tool_name(t: dict) -> str:
+    return t["function"]["name"]
+
+
+def _get_tool_description(t: dict) -> str:
+    return t["function"].get("description", "")
+
+
+def _get_tool_params(t: dict) -> dict:
+    return t["function"].get("parameters", {"type": "object", "properties": {}})
+
+
+# A compact catalog (name + description only) used ONLY for the selection phase.
+TOOL_CATALOG = build_tool_catalog(TOOLS, _get_tool_name, _get_tool_description)
+
+
+# ---------------------------------------------------------------------------
+# 4. Low-level call to the LLM
 # ---------------------------------------------------------------------------
 def call_llm(messages, tools=None):
     """Send the conversation + a tool subset to the LLM and return the raw message.
 
     `tools` is the list of tool schemas to expose for THIS call. If None, no
-    tools are sent (used for the plain selection/answer phases).
+    tools are sent (used for the plain planning/answer phases).
     """
     payload = {
         "model": MODEL,
@@ -343,28 +285,8 @@ def call_llm(messages, tools=None):
     return data["choices"][0]["message"]
 
 
-# ---------------------------------------------------------------------------
-# 3b. Planning phase
-#     Ask the LLM (using the compact tool + skill catalogs) which skills and
-#     tools this task needs, and to outline a test flow. NOTHING is executed
-#     here — it only plans, and the flow is shown to the user. The generic
-#     planning/scripting logic lives in task_planner.py; here we just bind it to
-#     the LM Studio backend (LLM call + tool-schema accessors).
-# ---------------------------------------------------------------------------
-def _get_tool_name(t):
-    return t["function"]["name"]
-
-
-def _get_tool_description(t):
-    return t["function"].get("description", "")
-
-
-def _get_tool_params(t):
-    return t["function"].get("parameters", {"type": "object", "properties": {}})
-
-
 def _plan_llm_call(prompt: str, max_tokens: int) -> str:
-    """LLM call used for planning/scripting (single user prompt, no tools)."""
+    """LLM call used for planning/scripting/report (single user prompt, no tools)."""
     message = call_llm([{"role": "user", "content": prompt}], tools=None)
     text = (message.get("content") or "").strip()
     if not text:
@@ -372,44 +294,55 @@ def _plan_llm_call(prompt: str, max_tokens: int) -> str:
     return text
 
 
-def select_tools_for_task(user_goal: str):
-    """Plan skills + tools + flow for a task (LM Studio-bound wrapper)."""
-    return _plan_select_tools(
+# ---------------------------------------------------------------------------
+# 5. Planning + test-script generation (bound to the shared ai_task_planner).
+# ---------------------------------------------------------------------------
+def select_tools_for_task(user_goal: str) -> tuple:
+    """Plan + precheck skills, tools, flow and capability (LM Studio-bound wrapper)."""
+    return _select_tools_for_task(
         user_goal,
         llm_call=_plan_llm_call,
         tool_catalog=TOOL_CATALOG,
-        skill_catalog=_build_skill_catalog(),
+        skill_catalog=build_skill_catalog(SKILLS),
         tools_by_name=TOOLS_BY_NAME,
         valid_skill_names=SKILLS,
     )
 
 
-def _print_plan(selected_names: list, selected_skills: list, flow: list) -> None:
-    """Show the planned skills, tools, and test flow. No tools are executed."""
-    print("\n--- Planned test flow (no tools executed yet) ---")
-    print(f"Skills to load : {selected_skills or '(none)'}")
-    print(f"Tools to use   : {selected_names}")
-    if flow:
-        print("Test flow:")
-        for i, item in enumerate(flow, 1):
-            step = item.get("step", "")
-            step_tools = item.get("tools") or []
-            tools_str = ", ".join(step_tools) if step_tools else "(no tools)"
-            print(f"  {i}. {step}  [tools: {tools_str}]")
-    else:
-        print("Test flow    : (none provided)")
-    print("-------------------------------------------------")
+def _skills_text(skill_names) -> str:
+    """Concatenate the full instruction bodies of the given skills for the planner."""
+    parts = []
+    for name in skill_names or []:
+        skill = SKILLS.get(name)
+        if skill and skill.get("body"):
+            parts.append(f"### Skill: {skill['name']}\n{skill['body']}")
+    return "\n\n".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# 3c. Test-script generation
-#     Use the planned flow as a prompt and ask the LLM to turn it into a
-#     concrete, runnable JSON test script: an ordered list of tool calls with
-#     reasonable parameters. The script is saved as a .json file.
-# ---------------------------------------------------------------------------
-def generate_test_script(user_goal: str, selected_tools, flow):
-    """Turn a planned flow into a runnable JSON test script (LM Studio-bound)."""
-    return _plan_generate_script(
+# LM Studio-bound helper that gathers real runtime context (report folder path,
+# current time, device names) before the test script is written. The loop itself
+# lives in ai_agent_backend.py to keep this file focused on the agent flow.
+_gather_script_context = make_openai_script_context_gatherer(
+    call_llm=call_llm,
+    tools=TOOLS,
+    tool_functions=TOOL_IMPLEMENTATIONS,
+    system_prompt=SYSTEM_PROMPT,
+    tool_names=DEFAULT_SCRIPT_CONTEXT_TOOLS,
+)
+
+
+def generate_test_script(
+    user_goal: str, selected_tools: list, flow: list, selected_skills=None
+) -> tuple:
+    """Turn a planned flow into a runnable JSON test script (LM Studio-bound).
+
+    The final report-writing step (write_file) is excluded on purpose — the report
+    is generated after the test finishes using the real tool results, not
+    pre-scripted with placeholder content. The selected skills' full instructions
+    (with their calibrated coordinates/values) are passed in so the script uses the
+    exact parameters instead of guessed ones.
+    """
+    return _generate_test_script(
         user_goal,
         selected_tools,
         flow,
@@ -418,47 +351,154 @@ def generate_test_script(user_goal: str, selected_tools, flow):
         get_tool_name=_get_tool_name,
         get_tool_params=_get_tool_params,
         script_dir=SCRIPT_DIR,
+        exclude_step_tools={"write_file"},
+        gather_context=_gather_script_context,
+        skills_text=_skills_text(selected_skills),
     )
 
 
-def _print_script(script_obj) -> None:
-    """Show the generated test script as a numbered list of tool calls."""
-    print("\n--- Generated test script ---")
-    steps = script_obj.get("steps", [])
-    if not steps:
-        print("  (no steps generated)")
-    for i, step in enumerate(steps, 1):
-        args = step.get("arguments", {})
-        arg_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-        print(f"  {i}. {step.get('function')}({arg_str})")
-    print("-----------------------------")
+def _generate_ai_report(run_data: dict) -> str:
+    """Have the AI write the final report from the run data + report-format skill.
+
+    The test itself already ran deterministically; this is a single LLM call that
+    turns the collected per-round results (and any error messages) into a polished
+    report following the report-format skill. Returns the report markdown.
+    """
+    skill = SKILLS.get("report-format")
+    skill_body = skill["body"] if skill else ""
+    prompt = (
+        "You are writing the FINAL test report for a test run that has already "
+        "finished. Do NOT call any tools — just write the report text.\n\n"
+        "Follow these report-format rules exactly:\n"
+        f"{skill_body}\n\n"
+        "Here is the raw run data (per-round step results and any error messages). "
+        "Use it as the source of truth — do not invent results:\n"
+        f"{run_data.get('raw_report', '')}\n\n"
+        f"Overall result: {run_data.get('overall')} | Rounds: {run_data.get('rounds')}\n"
+        f"Test start time: {run_data.get('start_time'):%Y-%m-%d %H:%M:%S}\n"
+        f"Test end time: {run_data.get('end_time'):%Y-%m-%d %H:%M:%S}\n\n"
+        "Write the complete final report in Markdown. Include the required sections "
+        "in order (Test Item, Test Result, Summary), plus Test Start Time and Test "
+        "End Time, and a Test Error Happened Time section if any step failed. "
+        "Summarize the rounds and clearly call out any failures with their error "
+        "messages. Output ONLY the report markdown, no extra commentary."
+    )
+    return _plan_llm_call(prompt, 4096)
 
 
 # ---------------------------------------------------------------------------
-# 4. The agent loop: decide -> call tool -> observe -> repeat -> answer
+# 6. Request classification + confirmation parsing (mirrored from ai_agent.py).
 # ---------------------------------------------------------------------------
-def _run_loop(user_goal: str, selected_tools, verbose: bool = True, preloaded_skills=None):
+TEST_KEYWORDS = (
+    "test",
+    "validate",
+    "validation",
+    "verify",
+    "verification",
+    "check",
+    "schedule",
+)
+
+
+def _is_test_request(text: str) -> bool:
+    """Return True if the text contains a test/validation keyword (whole word)."""
+    pattern = r"\b(" + "|".join(TEST_KEYWORDS) + r")\b"
+    return bool(re.search(pattern, text, re.IGNORECASE))
+
+
+def _parse_rounds(user_text: str) -> int:
+    """Extract how many times to run the test. Defaults to 1 when unspecified."""
+    text = (user_text or "").lower()
+    m = re.search(
+        r"(\d+)\s*(?:times|rounds?|iterations?|cycles?|loops?|reps?|repetitions?|passes)\b",
+        text,
+    )
+    if m:
+        return max(1, int(m.group(1)))
+    m = re.search(
+        r"(?:repeat|iterate|loop|run|cycle)\s+(?:it\s+|the\s+test\s+)?(\d+)",
+        text,
+    )
+    if m:
+        return max(1, int(m.group(1)))
+    return 1
+
+
+def _parse_confirmation(user_text: str) -> tuple:
+    """Parse a user reply into (decision, extra_instruction).
+
+    decision: 'yes' | 'no' | 'pending'
+    extra_instruction: any additional context the user added after the intent word.
+    """
+    text = user_text.strip()
+    yes_pattern = re.compile(
+        r"^\s*(yes|yeah|yep|yup|sure|ok|okay|go ahead|go|start|proceed|continue|do it|let'?s go|please start)"
+        r"(?:[,!.]?\s+(.*))?$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    no_pattern = re.compile(
+        r"^\s*(no|nope|nah|cancel|stop|don'?t|do not|abort|skip it)"
+        r"(?:[,!.]?\s+(.*))?$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    m = yes_pattern.match(text)
+    if m:
+        extra = (m.group(2) or "").strip()
+        extra = re.sub(
+            r"^(but|please|just|also|and|however|though)\s+",
+            "",
+            extra,
+            flags=re.IGNORECASE,
+        ).strip()
+        return "yes", extra
+
+    m = no_pattern.match(text)
+    if m:
+        extra = (m.group(2) or "").strip()
+        extra = re.sub(
+            r"^(but|please|just|also|and|however|though)\s+",
+            "",
+            extra,
+            flags=re.IGNORECASE,
+        ).strip()
+        return "no", extra
+    return "pending", ""
+
+
+def _emit(step_callback, print_logs: bool, text: str) -> None:
+    """Send a progress line to the console and/or the UI callback."""
+    if print_logs:
+        print(text, flush=True)
+    if step_callback:
+        try:
+            step_callback(text)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# 7. The agent tool-use loop: decide -> call tool -> observe -> repeat -> answer.
+#    Operates on a shared `messages` list (system + history already present).
+# ---------------------------------------------------------------------------
+def _run_tool_loop(
+    messages: list,
+    selected_tools: list,
+    preloaded_skills=None,
+    print_tool_logs: bool = True,
+    step_callback=None,
+) -> str:
     """Run the decide->call->observe loop with a FIXED tool subset.
 
-    `preloaded_skills` is a list of skill names chosen during planning; their
-    full instructions are injected up front so the model doesn't need to call
-    load_skill for them.
-
-    Returns the final answer text (or None if the step limit was hit).
+    `preloaded_skills` is a list of skill names chosen during planning; their full
+    instructions are injected up front so the model doesn't need to call load_skill
+    for them. Returns the final answer text.
     """
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_goal},
-    ]
-
-    # Track which skills were already loaded in THIS run. Small local models
-    # tend to re-issue the same load_skill call over and over even though the
-    # instructions are already in context; we short-circuit those repeats.
+    # Track which skills were already loaded in THIS run. Small local models tend
+    # to re-issue the same load_skill call repeatedly even though the instructions
+    # are already in context; we short-circuit those repeats.
     loaded_skills: set = set()
 
-    # Inject the instructions for skills chosen during planning so they are
-    # already in context (no load_skill round-trip needed for them).
-    for skill_name in (preloaded_skills or []):
+    for skill_name in preloaded_skills or []:
         skill = SKILLS.get(skill_name)
         if skill and skill["name"] not in loaded_skills:
             messages.append(
@@ -470,12 +510,9 @@ def _run_loop(user_goal: str, selected_tools, verbose: bool = True, preloaded_sk
                 }
             )
             loaded_skills.add(skill["name"])
-            if verbose:
-                print(f"[skill] Pre-loaded '{skill['name']}' from the plan.")
+            _emit(step_callback, print_tool_logs, f"[skill] Pre-loaded '{skill['name']}' from the plan.")
 
     for step in range(1, MAX_STEPS + 1):
-        if verbose:
-            print(f"\n--- Step {step}: asking the LLM ---")
         message = call_llm(messages, tools=selected_tools)
         tool_calls = message.get("tool_calls") or []
 
@@ -484,13 +521,11 @@ def _run_loop(user_goal: str, selected_tools, verbose: bool = True, preloaded_sk
             final = (message.get("content") or "").strip()
             if not final:
                 final = (message.get("reasoning_content") or "").strip()
-            if verbose:
-                print("\n=== Final answer ===")
-                print(final or "[!] Empty response.")
+            messages.append({"role": "assistant", "content": final})
             return final
 
-        # The assistant message that contains the tool calls must be added
-        # to history before we append the tool results.
+        # The assistant message that contains the tool calls must be added to
+        # history before we append the tool results.
         messages.append(
             {
                 "role": "assistant",
@@ -509,28 +544,23 @@ def _run_loop(user_goal: str, selected_tools, verbose: bool = True, preloaded_sk
             except json.JSONDecodeError:
                 args = {}
 
-            if verbose:
-                print(f"[tool call] {name}({args})")
+            _emit(step_callback, print_tool_logs, f"  [Tool: {name}({args})]")
 
             impl = TOOL_IMPLEMENTATIONS.get(name)
             if impl is None:
                 result = f"Error: unknown tool '{name}'."
             elif name == "load_skill" and args.get("name") in loaded_skills:
                 # Skill already loaded this run — don't resend the full body.
-                # A short reminder nudges the model to move on instead of looping.
                 result = (
                     f"Skill '{args.get('name')}' is already loaded; its full "
                     "instructions are already in the conversation above. Do NOT "
                     "load it again — proceed with the task using those instructions."
                 )
-                if verbose:
-                    print(f"[skill] '{args.get('name')}' already loaded; skipping reload.")
             else:
                 try:
                     result = impl(**args)
                 except Exception as exc:  # noqa: BLE001
                     result = f"Error running tool: {exc}"
-                # Remember successfully loaded skills so repeats are short-circuited.
                 if (
                     name == "load_skill"
                     and isinstance(result, dict)
@@ -538,8 +568,7 @@ def _run_loop(user_goal: str, selected_tools, verbose: bool = True, preloaded_sk
                 ):
                     loaded_skills.add(result.get("name"))
 
-            if verbose:
-                print(f"[tool result] {result}")
+            _emit(step_callback, print_tool_logs, f"  [Result: {result}]")
 
             messages.append(
                 {
@@ -549,281 +578,220 @@ def _run_loop(user_goal: str, selected_tools, verbose: bool = True, preloaded_sk
                 }
             )
 
-    if verbose:
-        print("\n[!] Reached the step limit without a final answer.")
-    return None
-
-
-def run_agent(user_goal: str):
-    """Plan the task, generate a concrete JSON test script, then STOP.
-
-    The test is NOT executed — planning + script generation only. Uncomment the
-    _run_loop call below to actually run the flow.
-    """
-    print("\n--- Planning tools & flow for this task ---")
-    selected_tools, selected_names, selected_skills, flow, _assessment = select_tools_for_task(user_goal)
-    _print_plan(selected_names, selected_skills, flow)
-
-    # Use the planned flow as a prompt to build a concrete JSON test script.
-    script_obj, script_path = generate_test_script(user_goal, selected_tools, flow)
-    if script_obj:
-        _print_script(script_obj)
-        if script_path:
-            print(f"[script] Saved test script to: {script_path}")
-
-    print("[plan] Flow + script created — stopping without executing the test.")
-    return script_obj
-    # return _run_loop(user_goal, selected_tools, preloaded_skills=selected_skills)
-
-
-# Keywords that mark a request as a TEST/validation task (triggers flow planning).
-TEST_KEYWORDS = (
-    "test",
-    "validate",
-    "validation",
-    "verify",
-    "verification",
-    "check",
-)
-
-
-def _is_test_request(text: str) -> bool:
-    """Return True if the text contains a test/validation keyword (whole word)."""
-    pattern = r"\b(" + "|".join(TEST_KEYWORDS) + r")\b"
-    return bool(re.search(pattern, text, re.IGNORECASE))
-
-
-def run_chat(user_goal: str):
-    """Normal chatbot: answer / assist using the available tools, no test flow."""
-    print("\n--- Chatting (no test flow) ---")
-    return _run_loop(user_goal, TOOLS)
+    reply = "[!] Reached the step limit without a final answer."
+    messages.append({"role": "assistant", "content": reply})
+    return reply
 
 
 # ---------------------------------------------------------------------------
-# 4b. Validation runner: select tools ONCE, then repeat the round N times.
+# 8. One agent turn: confirmation handling + plan/script + deterministic run.
+#    Mirrors ai_agent._run_agent_turn, bound to the LM Studio backend.
 # ---------------------------------------------------------------------------
-def _write_validation_report(
-    task: str,
-    rounds: int,
-    pass_count: int,
-    fail_count: int,
-    unknown: int,
-    results: list,
-    selected_names: list,
-    start_time: datetime,
-    end_time: datetime,
-) -> str | None:
-    """Write the final validation report following the report-format skill.
+PENDING_TEST_CONFIRMATIONS = {}
+PENDING_TEST_SCRIPTS = {}  # Planned test scripts awaiting user confirmation
 
-    Creates a run folder `report/report_YYYYMMDD_HHmmss` and a report file with
-    the same name. Required contents (in order): Test Item, Test Result, Summary,
-    plus Test Start Time and Test End Time.
-    """
-    try:
-        stamp = start_time.strftime("%Y%m%d_%H%M%S")
-        run_folder = os.path.join(SCRIPT_DIR, "report", f"report_{stamp}")
-        os.makedirs(run_folder, exist_ok=True)
-        report_file = os.path.join(run_folder, f"report_{stamp}.md")
 
-        pass_rate = (pass_count / rounds * 100) if rounds else 0.0
-        overall = "PASS" if fail_count == 0 and unknown == 0 else "FAIL"
-        failed_rounds = [r for r, v, _ in results if v == "FAIL"]
-        unknown_rounds = [r for r, v, _ in results if v == "UNKNOWN"]
+def _run_agent_turn(
+    messages: list,
+    user_text: str,
+    print_tool_logs: bool = True,
+    require_test_confirmation: bool = True,
+    step_callback=None,
+) -> str:
+    """Run one agent turn with tool handling and return the final text reply."""
+    session_key = id(messages)
+    pending_request = PENDING_TEST_CONFIRMATIONS.get(session_key)
+    confirmed_execution = False
 
-        # Per-round verdict lines.
-        round_lines = "\n".join(
-            f"- Round {r}: {v}" for r, v, _ in results
-        ) or "- (no rounds executed)"
+    if pending_request:
+        decision, extra_instruction = _parse_confirmation(user_text)
 
-        # Per-round details including the LLM's full final answer/summary.
-        detail_blocks = []
-        for r, v, final_text in results:
-            answer = (final_text or "").strip() or "(no answer returned)"
-            detail_blocks.append(
-                f"### Round {r} — {v}\n{answer}"
+        if decision == "yes":
+            plan = PENDING_TEST_SCRIPTS.pop(session_key, None)
+            PENDING_TEST_CONFIRMATIONS.pop(session_key, None)
+            script = (plan or {}).get("script") or {}
+
+            # Deterministic path: with a concrete script and no extra instructions,
+            # run the steps directly by calling each tool function — no LLM, so no
+            # token cost. The model was only used to PLAN the script.
+            has_runnable = bool(
+                script.get("setup") or script.get("steps") or script.get("teardown")
             )
-        round_details = "\n\n".join(detail_blocks) or "(no rounds executed)"
+            if has_runnable and not extra_instruction:
+                rounds = _parse_rounds(pending_request)
+                messages.append({"role": "user", "content": user_text})
+                reply = run_test_script(
+                    script,
+                    tool_functions=TOOL_IMPLEMENTATIONS,
+                    rounds=rounds,
+                    step_callback=step_callback,
+                    print_logs=print_tool_logs,
+                    script_dir=SCRIPT_DIR,
+                    report_generator=_generate_ai_report,
+                )
+                messages.append({"role": "assistant", "content": reply})
+                return reply
 
-        error_line = ""
-        if failed_rounds or unknown_rounds:
-            error_line = (
-                f"\n## Test Error Happened Time\n{end_time:%Y-%m-%d %H:%M:%S}\n"
+            # Fallback: let the LLM agent execute (e.g. the user added extra
+            # instructions, or no runnable script was produced).
+            confirmed_execution = True
+            extra_clause = (
+                f" Additionally: {extra_instruction}." if extra_instruction else ""
+            )
+            script_clause = ""
+            if script.get("steps"):
+                script_clause = (
+                    " Follow this pre-planned test script (adjust arguments only if "
+                    "the live system state requires it):\n"
+                    + json.dumps(script, indent=2)
+                )
+            user_text = (
+                f"User confirmed to proceed. Execute this test plan now: {pending_request}.{extra_clause}"
+                f"{script_clause} "
+                "Use tools as needed and report each major step result."
             )
 
-        content = (
-            f"# Validation Report report_{stamp}\n\n"
-            "## Test Item\n"
-            f"{task}\n\n"
-            f"Rounds requested: {rounds}\n"
-            f"Tools used: {', '.join(selected_names)}\n\n"
-            "## Test Result\n"
-            f"Overall: {overall}\n\n"
-            f"{round_lines}\n\n"
-            "## Summary\n"
-            f"- Total rounds: {rounds}\n"
-            f"- PASS: {pass_count}\n"
-            f"- FAIL: {fail_count}\n"
-            f"- UNKNOWN: {unknown}\n"
-            f"- Pass rate: {pass_rate:.1f}%\n"
-            f"- Failed rounds: {failed_rounds or 'none'}\n"
-            f"- Unknown rounds: {unknown_rounds or 'none'}\n\n"
-            "## Round Details (LLM summaries)\n"
-            f"{round_details}\n\n"
-            f"## Test Start Time\n{start_time:%Y-%m-%d %H:%M:%S}\n\n"
-            f"## Test End Time\n{end_time:%Y-%m-%d %H:%M:%S}\n"
-            f"{error_line}"
+        elif decision == "no":
+            PENDING_TEST_CONFIRMATIONS.pop(session_key, None)
+            PENDING_TEST_SCRIPTS.pop(session_key, None)
+            if extra_instruction:
+                # User cancelled but left a follow-up request — handle it fresh.
+                messages.append({"role": "user", "content": user_text})
+                messages.append(
+                    {"role": "assistant", "content": "Test execution cancelled."}
+                )
+                return _run_agent_turn(
+                    messages,
+                    extra_instruction,
+                    print_tool_logs=print_tool_logs,
+                    require_test_confirmation=require_test_confirmation,
+                    step_callback=step_callback,
+                )
+            cancel_reply = "Test execution cancelled. Let me know if you'd like to try something else."
+            messages.append({"role": "user", "content": user_text})
+            messages.append({"role": "assistant", "content": cancel_reply})
+            return cancel_reply
+
+        else:
+            reminder_reply = (
+                "A test plan is waiting for your confirmation. "
+                'Please reply **yes** to start the test (you can also add extra instructions, e.g. "yes, but also check the mic") '
+                'or **no** to cancel (you can also add a new request, e.g. "no, please just check Bluetooth status").'
+            )
+            messages.append({"role": "user", "content": user_text})
+            messages.append({"role": "assistant", "content": reminder_reply})
+            return reminder_reply
+
+    if (
+        require_test_confirmation
+        and _is_test_request(user_text)
+        and not confirmed_execution
+    ):
+        # ONE combined step: plan skills/tools/flow, precheck capability, and turn
+        # the flow into a concrete runnable test script (tool calls with proper
+        # parameters).
+        _emit(
+            step_callback,
+            print_tool_logs,
+            "[Planning] Analyzing your request and building the test plan — "
+            "picking the right tools and skills… this can take a moment.",
+        )
+        selected_tools, selected_names, selected_skills, flow, assessment = (
+            select_tools_for_task(user_text)
+        )
+        _emit(
+            step_callback,
+            print_tool_logs,
+            "[Planning] Gathering device info and generating the concrete test "
+            "script with proper parameters…",
+        )
+        script_obj, script_path = generate_test_script(
+            user_text, selected_tools, flow, selected_skills
+        )
+        _emit(step_callback, print_tool_logs, "[Planning] Finalizing the test plan…")
+        rounds = _parse_rounds(user_text)
+        plan_block = format_plan_for_reply(
+            script_obj, script_path, selected_skills, flow, assessment, rounds
         )
 
-        with open(report_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        return report_file
-    except OSError as exc:
-        print(f"[report] Failed to write report: {exc}")
-        return None
-
-
-def run_validation(task: str, rounds: int = 100):
-    """Run the same validation task many times, reusing one tool selection.
-
-    Each round asks the model to end its answer with 'RESULT: PASS' or
-    'RESULT: FAIL' so we can track a pass/fail summary across all rounds.
-    """
-    # Plan ONCE — the round definition never changes.
-    print("\n--- Planning tools & flow for the validation task (once) ---")
-    selected_tools, selected_names, selected_skills, flow, _assessment = select_tools_for_task(task)
-    _print_plan(selected_names, selected_skills, flow)
-
-    # Record the overall start time for the report (report-format skill).
-    start_time = datetime.now()
-
-    # Ask the model to end each round with a clear machine-readable verdict.
-    round_task = (
-        f"{task}\n\n"
-        "When you have finished, end your reply with a line exactly like "
-        "'RESULT: PASS' if the check succeeded, or 'RESULT: FAIL' if it did not."
-    )
-
-    results = []  # list of (round_number, verdict, final_text)
-    pass_count = 0
-    fail_count = 0
-
-    for r in range(1, rounds + 1):
-        print(f"\n========== Round {r}/{rounds} ==========")
-        final_text = _run_loop(
-            round_task, selected_tools, verbose=True, preloaded_skills=selected_skills
+        # Always show the schedule + script and ask for confirmation before running.
+        PENDING_TEST_CONFIRMATIONS[session_key] = user_text
+        PENDING_TEST_SCRIPTS[session_key] = {
+            "script": script_obj,
+            "path": script_path,
+            "skills": selected_skills,
+        }
+        confirmation_prompt = (
+            "\n\n---\n"
+            "**Ready to start?** Please reply **yes** to begin or **no** to cancel."
         )
+        reply = plan_block + confirmation_prompt
+        messages.append({"role": "user", "content": user_text})
+        messages.append({"role": "assistant", "content": reply})
+        return reply
 
-        verdict = "UNKNOWN"
-        if final_text:
-            m = re.search(r"RESULT:\s*(PASS|FAIL)", final_text, re.IGNORECASE)
-            if m:
-                verdict = m.group(1).upper()
-
-        if verdict == "PASS":
-            pass_count += 1
-        elif verdict == "FAIL":
-            fail_count += 1
-
-        results.append((r, verdict, final_text or ""))
-        print(f"[round {r}] verdict: {verdict}")
-
-    # Summary
-    unknown = rounds - pass_count - fail_count
-    print("\n================ VALIDATION SUMMARY ================")
-    print(f"Total rounds : {rounds}")
-    print(f"PASS         : {pass_count}")
-    print(f"FAIL         : {fail_count}")
-    print(f"UNKNOWN      : {unknown}")
-    if rounds:
-        print(f"Pass rate    : {pass_count / rounds * 100:.1f}%")
-    failed_rounds = [r for r, v, _ in results if v == "FAIL"]
-    if failed_rounds:
-        print(f"Failed rounds: {failed_rounds}")
-    print("===================================================")
-
-    # After all rounds finish, write the final report following the
-    # report-format skill (run folder + report file, required contents).
-    end_time = datetime.now()
-    report_path = _write_validation_report(
-        task=task,
-        rounds=rounds,
-        pass_count=pass_count,
-        fail_count=fail_count,
-        unknown=unknown,
-        results=results,
-        selected_names=selected_names,
-        start_time=start_time,
-        end_time=end_time,
+    # Normal chat / confirmed-fallback execution -> tool-using agent loop.
+    messages.append({"role": "user", "content": user_text})
+    preloaded = None
+    if confirmed_execution:
+        plan = PENDING_TEST_SCRIPTS.pop(session_key, None)
+        preloaded = (plan or {}).get("skills")
+    return _run_tool_loop(
+        messages,
+        TOOLS,
+        preloaded_skills=preloaded,
+        print_tool_logs=print_tool_logs,
+        step_callback=step_callback,
     )
-    if report_path:
-        print(f"[report] Final report written to: {report_path}")
-
-    return {
-        "rounds": rounds,
-        "pass": pass_count,
-        "fail": fail_count,
-        "unknown": unknown,
-        "tools_used": selected_names,
-        "results": results,
-        "report_path": report_path,
-    }
 
 
 # ---------------------------------------------------------------------------
-# 5. Simple interactive front-end
+# 9. Interactive front-end (mirrors ai_agent.run_agent).
 # ---------------------------------------------------------------------------
-def main():
-    print("=== LM Studio Tool-Using Agent Demo ===")
+def run_agent():
+    """Run an interactive AI agent loop with tool use."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    print("=== AI Agent (LM Studio) ===")
+    print(f"Model: {MODEL} @ {BASE_URL}")
     print(f"Loaded {len(TOOLS)} tools from the tools/ folder.")
-    print("Ask the agent to perform a task and it will call the matching tools.")
-    print("Commands:")
-    print("  <message with 'test'/'validate'/'verify'/'check'>  build a test flow")
-    print("  validate <N> <task>   run <task> as a validation loop for N rounds")
-    print("  <anything else>       normal AI chat")
-    print("  exit / quit           leave")
-    print()
+    print(f"Loaded {len(SKILLS)} skill(s): {', '.join(SKILLS.keys()) or '(none)'}")
+    print(
+        "Send a message containing 'test'/'validate'/'verify'/'check' to plan a test; "
+        "anything else is normal chat."
+    )
+    print("Type 'quit' or 'exit' to stop.\n")
 
     while True:
         try:
-            goal = input("You: ").strip()
+            user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n[*] Bye!")
+            print("\nGoodbye!")
             break
 
-        if not goal:
+        if not user_input:
             continue
-        if goal.lower() in ("exit", "quit"):
-            print("[*] Bye!")
+        if user_input.lower() in ("quit", "exit"):
+            print("Goodbye!")
             break
 
         try:
-            # "validate <N> <task>" -> run the validation loop N times.
-            if goal.lower().startswith("validate ") and len(goal.split(maxsplit=2)) == 3 and goal.split(maxsplit=2)[1].isdigit():
-                parts = goal.split(maxsplit=2)
-                rounds = int(parts[1])
-                task = parts[2]
-                run_validation(task, rounds=rounds)
-            # A test/validation keyword -> build a test flow (planning only).
-            elif _is_test_request(goal):
-                run_agent(goal)
-            # Otherwise -> behave like a normal AI chat bot.
-            else:
-                run_chat(goal)
+            reply = _run_agent_turn(messages, user_input, print_tool_logs=True)
         except requests.exceptions.RequestException as exc:
-            print(f"[!] Request failed: {exc}")
-        print()
+            reply = f"[!] Request failed: {exc}"
+
+        print(f"\nAgent: {reply}\n")
 
 
 if __name__ == "__main__":
-    main()
+    run_agent()
 
 
 # ---------------------------------------------------------------------------
 # NOTE: JSON / ReAct fallback
 # ---------------------------------------------------------------------------
-# If gemma-4-12b-qat does NOT reliably return tool_calls, switch to a
-# prompt-based approach: instruct the model in the system prompt to reply with
-# a strict JSON object like:
+# If the model does NOT reliably return tool_calls, switch to a prompt-based
+# approach: instruct the model in the system prompt to reply with a strict JSON
+# object like:
 #     {"tool": "calculator", "args": {"expression": "2+2"}}
 # or  {"final": "the answer"}
 # then parse that JSON yourself, run the tool, and feed the result back as a

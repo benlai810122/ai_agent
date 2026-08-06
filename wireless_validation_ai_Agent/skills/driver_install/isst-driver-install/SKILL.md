@@ -18,12 +18,20 @@ installation or referencing driver paths.
 
 ## Version comparison before installing
 1. Always call `get_isst_driver_version` to check the currently installed version.
-2. Compare the version to install against the currently installed version:
-   - If the version to install is **LOWER**, first call `uninstall_isst_driver` to
-     remove the current driver, then proceed with installation.
-   - If the version to install is **EQUAL or HIGHER**, install directly without
-     uninstalling first.
+2. Regardless of whether the version to install is lower, equal, or higher than the
+   currently installed version, always uninstall the current ISST driver first
+   before installing the new version:
+   - Call `uninstall_all_isst_drivers` (or `uninstall_isst_driver`) to remove the
+     current driver, then proceed with installation.
 
 ## Installing
 When installing a driver version, install ALL `.inf` files found inside that
 version's driver folder.
+
+- **Preferred:** call `install_all_isst_drivers` and pass the version's driver
+  folder (e.g. the `Production` or `QS_Cert` folder, or its `Drivers` subfolder).
+  It automatically discovers and installs **every** `.inf` under that folder —
+  including nested `Extensions` INFs — so nothing is missed. Do NOT enumerate the
+  INF names by hand; that is error-prone and easily leaves files out.
+- Only fall back to calling `install_isst_driver` per file when you deliberately
+  need to install a single specific `.inf`.

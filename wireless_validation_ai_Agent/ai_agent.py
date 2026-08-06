@@ -234,6 +234,22 @@ def _skills_text(skill_names) -> str:
     return "\n\n".join(parts)
 
 
+def _echo_analysis_block(run_data: dict) -> str:
+    """Format the Echo MCP analysis (if any) as an input section for the report."""
+    analysis = run_data.get("echo_analysis")
+    if not analysis or not str(analysis).strip():
+        return ""
+    return (
+        "An independent analysis of this test result was produced by the Echo "
+        "assistant. Treat it as expert input — incorporate its findings into the "
+        "Summary where they add value, but the raw run data above remains the "
+        "source of truth for pass/fail:\n"
+        "=== ECHO ANALYSIS ===\n"
+        f"{analysis}\n"
+        "=== END ECHO ANALYSIS ===\n\n"
+    )
+
+
 def _generate_ai_report(run_data: dict) -> str:
     """Have the AI write the final report from the run data + report-format skill.
 
@@ -256,6 +272,7 @@ def _generate_ai_report(run_data: dict) -> str:
         "Here is the raw run data (per-round step results and any error messages). "
         "Use it as the source of truth — do not invent results:\n"
         f"{run_data.get('raw_report', '')}\n\n"
+        f"{_echo_analysis_block(run_data)}"
         f"Overall result: {run_data.get('overall')} | Rounds: {run_data.get('rounds')}\n"
         f"Test start time: {run_data.get('start_time'):%Y-%m-%d %H:%M:%S}\n"
         f"Test end time: {run_data.get('end_time'):%Y-%m-%d %H:%M:%S}\n\n"
