@@ -77,6 +77,22 @@ def _append_history_item(item: dict) -> None:
     _write_history(history)
 
 
+# Structured flow-panel events reuse the progress transport but must not be
+# persisted into the run history (the [Flow] payload is large and none of these
+# are human-readable log lines).
+_FLOW_EVENT_PREFIXES = ("[Flow]", "[Node]", "[Round]")
+
+
+def _strip_flow_events(progress: list) -> list:
+    cleaned = []
+    for item in progress or []:
+        text = item.get("text", "") if isinstance(item, dict) else str(item)
+        if text.startswith(_FLOW_EVENT_PREFIXES):
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
 def _run_chat_request(request_id: str, user_text: str, require_confirmation: bool = True) -> None:
     def _step_logger(step_text: str) -> None:
         with request_states_lock:
@@ -108,7 +124,7 @@ def _run_chat_request(request_id: str, user_text: str, require_confirmation: boo
                     "user_text": state.get("user_text", ""),
                     "started_at": state.get("started_at", ""),
                     "ended_at": state.get("ended_at", ""),
-                    "progress": state.get("progress", []),
+                    "progress": _strip_flow_events(state.get("progress", [])),
                     "reply": reply,
                 })
     except Exception as e:
@@ -124,7 +140,7 @@ def _run_chat_request(request_id: str, user_text: str, require_confirmation: boo
                     "user_text": state.get("user_text", ""),
                     "started_at": state.get("started_at", ""),
                     "ended_at": state.get("ended_at", ""),
-                    "progress": state.get("progress", []),
+                    "progress": _strip_flow_events(state.get("progress", [])),
                     "reply": "",
                     "error": str(e),
                 })
@@ -340,7 +356,7 @@ def _resume_pending_task_after_reboot() -> None:
                         "user_text": st.get("user_text", ""),
                         "started_at": st.get("started_at", ""),
                         "ended_at": st.get("ended_at", ""),
-                        "progress": st.get("progress", []),
+                        "progress": _strip_flow_events(st.get("progress", [])),
                         "reply": reply,
                     })
         except Exception as e:  # noqa: BLE001

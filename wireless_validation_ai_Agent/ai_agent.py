@@ -77,6 +77,7 @@ from ai_task_planner import (
 )
 from ai_agent_backend import make_script_context_gatherer, DEFAULT_SCRIPT_CONTEXT_TOOLS
 from ai_task_runner import run_test_script
+from ai_flow_model import build_flow_model, flow_event
 
 # When frozen by PyInstaller, bundled data files live in sys._MEIPASS.
 # The exe itself is in os.path.dirname(sys.executable).
@@ -598,6 +599,14 @@ def _plan_and_confirm(
     )
     _status("[Planning] Finalizing the test plan…")
     rounds = _parse_rounds(goal_text)
+    # Publish the flow-chart model so the Web UI panel can render the plan.
+    if step_callback and script_obj:
+        try:
+            model = build_flow_model(script_obj, rounds)
+            if model:
+                step_callback(flow_event(model))
+        except Exception:
+            pass
     plan_block = format_plan_for_reply(
         script_obj, script_path, selected_skills, flow, assessment, rounds
     )

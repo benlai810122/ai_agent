@@ -22,6 +22,7 @@ except Exception:  # pragma: no cover - Echo integration is optional
     analyze_test_result = None
 
 from ai_task_state_manager import save_runner_state, clear_runner_state
+from ai_flow_model import build_flow_model, flow_event, node_event, round_event
 
 # Tool functions that reboot the machine. When one of these runs as a top-level
 # step, the runner checkpoints its position first, issues the reboot, and stops;
@@ -355,6 +356,15 @@ def run_test_script(
     rounds = max(1, int(rounds or 1))
     base_dir = script_dir or os.getcwd()
 
+    # Publish the flow-chart model so the Web UI panel can render it before the
+    # first step runs (subsequent [Node] events drive the live highlight).
+    try:
+        _flow_model = build_flow_model(script, rounds)
+        if _flow_model:
+            _emit(step_callback, False, flow_event(_flow_model))
+    except Exception:  # noqa: BLE001 - visualization must never break a run
+        pass
+
     # Discover report folder from script arguments FIRST (script was generated with
     # absolute paths). If found, use that folder; otherwise create a new one.
     discovered_folder = None
@@ -474,6 +484,7 @@ def run_test_script(
                     "[Runner] Setup ", on_done=_tick,
                     report_folder_hint=planned_report_folder,
                     on_reboot=_on_reboot, start_index=s_start, prior_results=s_prior,
+                    node_base="setup",
                 )
                 report_folder = report_folder or folder
 
@@ -483,6 +494,7 @@ def run_test_script(
             round_start = resume_round if resume_phase == "steps" else 1
             for r in range(round_start, rounds + 1):
                 _cur["round"] = r
+                _emit(step_callback, False, round_event(r, rounds))
                 if resume_phase == "steps" and r == resume_round:
                     r_start, r_prior = resume_index, resume_partial
                 else:
@@ -501,6 +513,7 @@ def run_test_script(
                     round_number=r,
                     round_path_map=round_map,
                     on_reboot=_on_reboot, start_index=r_start, prior_results=r_prior,
+                    node_base="steps",
                 )
                 report_folder = report_folder or folder
                 round_overall = "PASS" if all(x["ok"] for x in results) else "FAIL"
@@ -520,6 +533,7 @@ def run_test_script(
                 "[Runner] Teardown ", on_done=_tick,
                 report_folder_hint=report_folder or planned_report_folder,
                 on_reboot=_on_reboot, start_index=t_start, prior_results=t_prior,
+                node_base="teardown",
             )
             report_folder = report_folder or folder
     except _RebootIssued:
@@ -655,6 +669,7 @@ def _execute_steps(
     on_reboot=None,
     start_index=0,
     prior_results=None,
+    node_base=None,
 ):
     """Run every step once with the given log prefix. Returns (results, report_folder).
 
@@ -662,10 +677,20 @@ def _execute_steps(
     reboot) and ``prior_results`` seeds the results list with those completed
     steps. ``on_reboot(next_step_index, current_partial)`` is called right before a
     top-level reboot step fires, so the runner can checkpoint and stop.
+
+    ``node_base`` (e.g. "setup"/"steps"/"teardown") enables live ``[Node]`` events
+    for the Web UI flow panel; node ids follow ``{node_base}-{i}`` and branch
+    children ``{node_base}-{i}-then/-else-{j}`` (see ai_flow_model).
     """
     results = list(prior_results) if prior_results else []
     report_folder = None
     round_path_map = round_path_map or {}
+
+    def _node(index, status, ok=None):
+        if node_base:
+            _emit(step_callback, False, node_event(
+                node_base, index, status, ok=ok, round_number=round_number,
+            ))
 
     for i, step in enumerate(steps, 1):
         if i <= start_index:
@@ -703,6 +728,7 @@ def _execute_steps(
                 f"condition='{condition_str}'",
             )
 
+            _node(i, "running")
             if_fn_callable = tool_functions.get(if_fn)
             if if_fn_callable is None:
                 if_result = {"error": f"Unknown function: {if_fn}"}
@@ -737,6 +763,7 @@ def _execute_steps(
                 round_number=round_number,
                 round_path_map=round_path_map,
                 on_reboot=None,     # reboot must be a top-level step (see below)
+                node_base=f"{node_base}-{i}-{branch_label.lower()}" if node_base else None,
             )
             results.extend(branch_results)
             report_folder = report_folder or branch_folder
@@ -753,6 +780,7 @@ def _execute_steps(
                 "branch": branch_label,
                 "condition": condition_str,
             })
+            _node(i, "done", ok=not _has_hard_error(if_result))
             if on_done:
                 on_done()
             continue
@@ -792,6 +820,7 @@ def _execute_steps(
                 _emit(step_callback, print_logs, f"{prefix}Step {i} ERROR: {_short(result)}")
                 results.append({"index": i, "function": fname,
                                 "arguments": effective_args, "result": result, "ok": False})
+                _node(i, "done", ok=False)
                 if on_done:
                     on_done()
                 continue
@@ -805,6 +834,7 @@ def _execute_steps(
                 f"{prefix}Step {i}/{total}: {fname}({json.dumps(effective_args, default=str)}) "
                 "— saving checkpoint and rebooting…",
             )
+            _node(i, "running")
             # Persist BEFORE issuing the reboot (in case delay_seconds is 0).
             on_reboot(i, results + [reboot_marker])
             fn = tool_functions.get(fname)
@@ -832,6 +862,7 @@ def _execute_steps(
             f"{prefix}Step {i}/{total}: {fname}({json.dumps(effective_args, default=str)})",
         )
 
+        _node(i, "running")
         fn = tool_functions.get(fname)
         if fn is None:
             result = {"error": f"Unknown function: {fname}"}
@@ -849,6 +880,7 @@ def _execute_steps(
             print_logs,
             f"{prefix}Step {i} {'ERROR' if errored else 'OK'}: {_short(result)}",
         )
+        _node(i, "done", ok=not errored)
 
         # Remember the real report folder so the report is written into it.
         if (
