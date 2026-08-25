@@ -45,7 +45,9 @@ def check_bluetooth_connection_status(device_name: str = "", address: str = "") 
         import re
 
         if not device_name and not address:
-            return {"error": "Please provide either device_name or address to search for."}
+            # No specific device requested: report overall Bluetooth radio health instead of
+            # failing, so "is Bluetooth still working?" checks don't error out.
+            return check_bluetooth_adapter_status()
 
         search_name = device_name.lower() if device_name else ""
         search_addr = address.upper() if address else ""
@@ -154,6 +156,54 @@ def check_bluetooth_connection_status(device_name: str = "", address: str = "") 
             }
 
         return {"status": "success", "devices": results}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def check_bluetooth_adapter_status() -> dict:
+    """Check whether the laptop's Bluetooth radio/adapter is present and working (enabled).
+    Use this to verify the Bluetooth function itself is healthy, e.g. after a reboot or after
+    toggling the radio off/on. Does not require a device name or address."""
+    try:
+        import subprocess
+
+        cmd = [
+            'powershell', '-Command',
+            "Get-PnpDevice -Class Bluetooth | Where-Object { $_.FriendlyName -match 'Bluetooth' } "
+            "| Select-Object FriendlyName, Status, Present | Format-List"
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+
+        adapters = []
+        name = status = present = ""
+        for line in proc.stdout.split("\n"):
+            if "FriendlyName" in line:
+                _, _, val = line.partition(":")
+                name = val.strip()
+            elif line.strip().startswith("Status"):
+                _, _, val = line.partition(":")
+                status = val.strip()
+            elif line.strip().startswith("Present"):
+                _, _, val = line.partition(":")
+                present = val.strip()
+                if name:
+                    adapters.append({
+                        "name": name,
+                        "status": status,
+                        "present": present.lower() == "true",
+                        "working": status.lower() == "ok",
+                    })
+                name = status = present = ""
+
+        working = any(a["working"] for a in adapters)
+        return {
+            "status": "success" if working else "error",
+            "adapter_present": len(adapters) > 0,
+            "adapter_working": working,
+            "adapters": adapters,
+            "message": "Bluetooth adapter is present and working." if working
+                       else "Bluetooth adapter not found or not working.",
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -740,6 +790,7 @@ if ($disconnectButton) {{
 BLUETOOTH_TOOL_FUNCTIONS = {
     "scan_bluetooth_devices": scan_bluetooth_devices,
     "check_bluetooth_connection_status": check_bluetooth_connection_status,
+    "check_bluetooth_adapter_status": check_bluetooth_adapter_status,
     "reconnect_bluetooth_via_ui": reconnect_bluetooth_via_ui,
     "set_bluetooth_radio_via_ui": set_bluetooth_radio_via_ui,
     "disconnect_bluetooth_via_ui": disconnect_bluetooth_via_ui,
@@ -767,6 +818,15 @@ BLUETOOTH_ANTHROPIC_TOOLS = [
                 "device_name": {"type": "string", "description": "The name (or partial name) of the Bluetooth device to search for, e.g. 'AirPods' or 'Sony WH'."},
                 "address": {"type": "string", "description": "The MAC address of the device to check."}
             },
+            "required": [],
+        },
+    },
+    {
+        "name": "check_bluetooth_adapter_status",
+        "description": "Check whether the laptop's Bluetooth radio/adapter itself is present and working (enabled). Use this to verify the Bluetooth function is healthy after a reboot or after toggling the radio off/on. Does NOT require a device name or address.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
             "required": [],
         },
     },
@@ -832,6 +892,18 @@ BLUETOOTH_OPENAI_TOOLS = [
                     "device_name": {"type": "string", "description": "The name (or partial name) of the Bluetooth device to search for, e.g. 'AirPods' or 'Sony WH'."},
                     "address": {"type": "string", "description": "The MAC address of the device to check."}
                 },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_bluetooth_adapter_status",
+            "description": "Check whether the laptop's Bluetooth radio/adapter itself is present and working (enabled). Use this to verify the Bluetooth function is healthy after a reboot or after toggling the radio off/on. Does NOT require a device name or address.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
                 "required": [],
             },
         },

@@ -21,6 +21,18 @@ try:
 except Exception:  # pragma: no cover - Echo integration is optional
     analyze_test_result = None
 
+from ai_task_state_manager import save_runner_state, clear_runner_state
+
+# Tool functions that reboot the machine. When one of these runs as a top-level
+# step, the runner checkpoints its position first, issues the reboot, and stops;
+# the run resumes deterministically after logon.
+_REBOOT_FUNCS = frozenset({"reboot_laptop"})
+
+
+class _RebootIssued(Exception):
+    """Raised to unwind the runner after a reboot step fires, so no further
+    steps run in the (about-to-die) process."""
+
 
 def _short(value, limit: int = 400) -> str:
     """Compact single-line rendering of a tool result for logs."""
@@ -50,18 +62,33 @@ _SUCCESS_STATUSES = frozenset({
 })
 
 
+# Functional-verdict values (reported in fields like ``overall``/``result``)
+# that mean the test outcome itself failed, even when the tool ran cleanly
+# (``status == "success"``). Used so a passing status can't mask a failing
+# verdict (e.g. sc_status_check -> {"status": "success", "overall": "FAIL"}).
+_FAILURE_VERDICTS = frozenset({"fail", "failed", "failure", "error"})
+
+
 def _has_hard_error(result) -> bool:
     """True only if the tool raised/returned a hard error (has an ``error`` key)."""
     return isinstance(result, dict) and bool(result.get("error"))
 
 
 def _is_failure(result) -> bool:
-    """A step failed if the tool reported an error or a non-success status.
+    """A step failed if the tool reported an error, a non-success status, or a
+    functional verdict of FAIL.
 
     Only statuses in ``_SUCCESS_STATUSES`` are considered passing; every other
     status counts as a failure. This ensures soft-failure statuses such as
     ``not_found`` or ``device_not_found`` (e.g. a Bluetooth/audio device that
     does not exist) correctly fail the test instead of being reported as PASS.
+
+    A tool can also execute cleanly (``status == "success"``) yet report a
+    failing functional outcome via a verdict field such as ``overall``/
+    ``result``/``verdict`` (e.g. ``sc_status_check`` returns
+    ``{"status": "success", "overall": "FAIL"}``). Those verdicts are honored
+    here so the deterministic runner (and the web UI reply it drives) agree with
+    the final report instead of reporting a false PASS.
     """
     if isinstance(result, dict):
         if result.get("error"):
@@ -69,6 +96,10 @@ def _is_failure(result) -> bool:
         status = str(result.get("status", "")).strip().lower()
         if status and status not in _SUCCESS_STATUSES:
             return True
+        for key in ("overall", "verdict", "result", "outcome"):
+            verdict = result.get(key)
+            if isinstance(verdict, str) and verdict.strip().lower() in _FAILURE_VERDICTS:
+                return True
     return False
 
 
@@ -285,6 +316,8 @@ def run_test_script(
     script_dir: str | None = None,
     report_generator=None,
     echo_analyze: bool = True,
+    resume_state: dict | None = None,
+    script_path: str | None = None,
 ) -> str:
     """Execute a planned test script for one or more rounds by calling tool funcs.
 
@@ -308,26 +341,68 @@ def run_test_script(
             an independent analysis first, and pass that analysis to the report
             generator (under run_data["echo_analysis"]). Skipped gracefully if
             Echo is unavailable.
+        resume_state: a checkpoint (from ai_task_state_manager.load_runner_state) used to
+            continue a run that was interrupted by a reboot step. When set, the
+            runner restores the report folder, completed results, and resumes from
+            the saved phase/round/step.
+        script_path: optional path of the saved script JSON, stored in the
+            checkpoint for reference.
     """
     setup = script.get("setup", []) if isinstance(script, dict) else []
     steps = script.get("steps", []) if isinstance(script, dict) else []
     teardown = script.get("teardown", []) if isinstance(script, dict) else []
     task = (script.get("task") if isinstance(script, dict) else "") or "Test run"
     rounds = max(1, int(rounds or 1))
-    start_time = datetime.now()
-    stamp = start_time.strftime("%Y%m%d_%H%M%S")
     base_dir = script_dir or os.getcwd()
-    
-    # Discover report folder from script arguments FIRST (script was generated with absolute paths)
-    # If found, use that folder; otherwise create a new one with current timestamp
+
+    # Discover report folder from script arguments FIRST (script was generated with
+    # absolute paths). If found, use that folder; otherwise create a new one.
     discovered_folder = None
     for phase in [setup, steps, teardown]:
         discovered_folder = _discover_report_folder(phase)
         if discovered_folder:
             break
-    
-    planned_report_folder = discovered_folder or os.path.join(base_dir, "report", f"report_{stamp}")
 
+    # ── Resume vs fresh run ──
+    if resume_state:
+        start_time = (
+            datetime.fromisoformat(resume_state["start_time"])
+            if resume_state.get("start_time")
+            else datetime.now()
+        )
+        stamp = resume_state.get("stamp") or start_time.strftime("%Y%m%d_%H%M%S")
+        rounds = int(resume_state.get("rounds", rounds) or rounds)
+        report_folder = resume_state.get("report_folder")
+        planned_report_folder = report_folder or discovered_folder or os.path.join(
+            base_dir, "report", f"report_{stamp}"
+        )
+        setup_results = resume_state.get("setup_results", []) or []
+        round_results = resume_state.get("round_results", []) or []
+        resume_phase = resume_state.get("phase")
+        resume_round = int(resume_state.get("current_round", 1) or 1)
+        resume_index = int(resume_state.get("next_step_index", 0) or 0)
+        resume_partial = resume_state.get("current_partial", []) or []
+        _emit(
+            step_callback, print_logs,
+            f"[Runner] Resuming after reboot — phase='{resume_phase}', "
+            f"round {resume_round}/{rounds}, next step index {resume_index}.",
+        )
+    else:
+        clear_runner_state()  # drop any stale checkpoint from a prior run
+        start_time = datetime.now()
+        stamp = start_time.strftime("%Y%m%d_%H%M%S")
+        report_folder = None
+        planned_report_folder = discovered_folder or os.path.join(
+            base_dir, "report", f"report_{stamp}"
+        )
+        setup_results = []
+        round_results = []
+        resume_phase = None
+        resume_round = 1
+        resume_index = 0
+        resume_partial = []
+
+    teardown_results = []
 
     _emit(
         step_callback,
@@ -335,8 +410,6 @@ def run_test_script(
         f"[Runner] Executing setup ({len(setup)}) + {len(steps)} step(s) × "
         f"{rounds} round(s) + teardown ({len(teardown)}) — no LLM, no token cost.",
     )
-
-    report_folder = None
 
     # Total step units across setup + all rounds + teardown, used to drive a
     # determinate progress bar in the UI (emitted as "[Progress] done/total").
@@ -351,50 +424,113 @@ def run_test_script(
             f"[Progress] {progress['done']}/{progress['total']}",
         )
 
-    # One-time setup.
-    setup_results = []
-    if setup:
-        _emit(step_callback, print_logs, "[Runner] ----- Setup -----")
-        setup_results, folder = _execute_steps(
-            setup, len(setup), tool_functions, step_callback, print_logs,
-            "[Runner] Setup ", on_done=_tick,
-            report_folder_hint=planned_report_folder,
-        )
-        report_folder = report_folder or folder
+    # Tracks where we are so the reboot checkpoint knows which phase/round to save.
+    _cur = {"phase": resume_phase or "setup", "round": resume_round}
+    _logon_scheduled = {"done": False}
 
-    # Repeated per-round body.
-    round_results = []
-    for r in range(1, rounds + 1):
-        if rounds > 1:
-            _emit(
-                step_callback,
-                print_logs,
-                f"[Runner] ===== Round {r}/{rounds} =====",
+    def _on_reboot(next_step_index: int, current_partial: list) -> None:
+        """Persist the runner checkpoint and register auto-start before rebooting."""
+        if not _logon_scheduled["done"]:
+            try:
+                from tools.regular_tools.power_state_ai_agent_tools import (
+                    schedule_ai_agent_on_startup,
+                )
+                schedule_ai_agent_on_startup()
+            except Exception:  # noqa: BLE001 - best effort; reboot proceeds regardless
+                pass
+            _logon_scheduled["done"] = True
+
+        save_runner_state({
+            "script": script,
+            "script_path": script_path,
+            "task": task,
+            "rounds": rounds,
+            "stamp": stamp,
+            "report_folder": report_folder or planned_report_folder,
+            "start_time": start_time.isoformat(),
+            "phase": _cur["phase"],
+            "current_round": _cur["round"],
+            "next_step_index": next_step_index,
+            "setup_results": setup_results,
+            "round_results": round_results,
+            "current_partial": current_partial,
+        })
+        _emit(
+            step_callback, print_logs,
+            "[Runner] Checkpoint saved. The system will reboot and the run will "
+            "resume automatically after logon.",
+        )
+
+    try:
+        # ── One-time setup (unless already completed before the reboot) ──
+        if resume_phase in (None, "setup"):
+            s_start = resume_index if resume_phase == "setup" else 0
+            s_prior = resume_partial if resume_phase == "setup" else None
+            if setup or s_prior:
+                _cur["phase"], _cur["round"] = "setup", 1
+                _emit(step_callback, print_logs, "[Runner] ----- Setup -----")
+                setup_results, folder = _execute_steps(
+                    setup, len(setup), tool_functions, step_callback, print_logs,
+                    "[Runner] Setup ", on_done=_tick,
+                    report_folder_hint=planned_report_folder,
+                    on_reboot=_on_reboot, start_index=s_start, prior_results=s_prior,
+                )
+                report_folder = report_folder or folder
+
+        # ── Repeated per-round body ──
+        if resume_phase in (None, "setup", "steps"):
+            _cur["phase"] = "steps"
+            round_start = resume_round if resume_phase == "steps" else 1
+            for r in range(round_start, rounds + 1):
+                _cur["round"] = r
+                if resume_phase == "steps" and r == resume_round:
+                    r_start, r_prior = resume_index, resume_partial
+                else:
+                    r_start, r_prior = 0, None
+                if rounds > 1:
+                    _emit(
+                        step_callback, print_logs,
+                        f"[Runner] ===== Round {r}/{rounds} =====",
+                    )
+                prefix = f"[Runner] R{r} " if rounds > 1 else "[Runner] "
+                round_map = {}
+                results, folder = _execute_steps(
+                    steps, len(steps), tool_functions, step_callback, print_logs, prefix,
+                    on_done=_tick,
+                    report_folder_hint=report_folder or planned_report_folder,
+                    round_number=r,
+                    round_path_map=round_map,
+                    on_reboot=_on_reboot, start_index=r_start, prior_results=r_prior,
+                )
+                report_folder = report_folder or folder
+                round_overall = "PASS" if all(x["ok"] for x in results) else "FAIL"
+                round_results.append(
+                    {"round": r, "results": results, "overall": round_overall}
+                )
+                _emit(step_callback, print_logs, f"[Runner] Round {r} — {round_overall}.")
+
+        # ── One-time teardown ──
+        _cur["phase"] = "teardown"
+        t_start = resume_index if resume_phase == "teardown" else 0
+        t_prior = resume_partial if resume_phase == "teardown" else None
+        if teardown or t_prior:
+            _emit(step_callback, print_logs, "[Runner] ----- Teardown -----")
+            teardown_results, folder = _execute_steps(
+                teardown, len(teardown), tool_functions, step_callback, print_logs,
+                "[Runner] Teardown ", on_done=_tick,
+                report_folder_hint=report_folder or planned_report_folder,
+                on_reboot=_on_reboot, start_index=t_start, prior_results=t_prior,
             )
-        prefix = f"[Runner] R{r} " if rounds > 1 else "[Runner] "
-        round_map = {}
-        results, folder = _execute_steps(
-            steps, len(steps), tool_functions, step_callback, print_logs, prefix,
-            on_done=_tick,
-            report_folder_hint=report_folder or planned_report_folder,
-            round_number=r,
-            round_path_map=round_map,
+            report_folder = report_folder or folder
+    except _RebootIssued:
+        reply = (
+            "## Reboot in progress\n\n"
+            f"The runner reached a reboot step for **{task}** and saved a "
+            "checkpoint. The system will restart and the test will resume "
+            "automatically after logon — no action needed."
         )
-        report_folder = report_folder or folder
-        overall = "PASS" if all(x["ok"] for x in results) else "FAIL"
-        round_results.append({"round": r, "results": results, "overall": overall})
-        _emit(step_callback, print_logs, f"[Runner] Round {r} — {overall}.")
-
-    # One-time teardown.
-    teardown_results = []
-    if teardown:
-        _emit(step_callback, print_logs, "[Runner] ----- Teardown -----")
-        teardown_results, folder = _execute_steps(
-            teardown, len(teardown), tool_functions, step_callback, print_logs,
-            "[Runner] Teardown ", on_done=_tick,
-            report_folder_hint=report_folder or planned_report_folder,
-        )
-        report_folder = report_folder or folder
+        _emit(step_callback, print_logs, "[Runner] Reboot issued — awaiting restart.")
+        return reply
 
     end_time = datetime.now()
     passed_rounds = sum(1 for rr in round_results if rr["overall"] == "PASS")
@@ -484,6 +620,9 @@ def run_test_script(
             script_dir=script_dir,
         )
 
+    # Run completed end-to-end (no pending reboot) — drop the resume checkpoint.
+    clear_runner_state()
+
     _emit(
         step_callback,
         print_logs,
@@ -513,13 +652,24 @@ def _execute_steps(
     report_folder_hint=None,
     round_number=None,
     round_path_map=None,
+    on_reboot=None,
+    start_index=0,
+    prior_results=None,
 ):
-    """Run every step once with the given log prefix. Returns (results, report_folder)."""
-    results = []
+    """Run every step once with the given log prefix. Returns (results, report_folder).
+
+    Resume support: ``start_index`` skips the first N steps (already done before a
+    reboot) and ``prior_results`` seeds the results list with those completed
+    steps. ``on_reboot(next_step_index, current_partial)`` is called right before a
+    top-level reboot step fires, so the runner can checkpoint and stop.
+    """
+    results = list(prior_results) if prior_results else []
     report_folder = None
     round_path_map = round_path_map or {}
 
     for i, step in enumerate(steps, 1):
+        if i <= start_index:
+            continue
         if not isinstance(step, dict):
             continue
 
@@ -586,6 +736,7 @@ def _execute_steps(
                 report_folder_hint=report_folder_hint,
                 round_number=round_number,
                 round_path_map=round_path_map,
+                on_reboot=None,     # reboot must be a top-level step (see below)
             )
             results.extend(branch_results)
             report_folder = report_folder or branch_folder
@@ -627,6 +778,44 @@ def _execute_steps(
             discovered = _discover_report_folder(effective_args)
             if discovered:
                 report_folder = discovered
+
+        # ── Reboot step: checkpoint, issue reboot, and stop this process ──
+        if fname in _REBOOT_FUNCS:
+            if on_reboot is None:
+                # Nested (conditional) reboot can't be resumed reliably because
+                # its index is branch-relative, not top-level. Fail loudly
+                # WITHOUT issuing the reboot so we don't strand a dead process.
+                result = {
+                    "error": "reboot must be a top-level step (not inside an if/"
+                    "then/else branch) so the runner can resume after restart."
+                }
+                _emit(step_callback, print_logs, f"{prefix}Step {i} ERROR: {_short(result)}")
+                results.append({"index": i, "function": fname,
+                                "arguments": effective_args, "result": result, "ok": False})
+                if on_done:
+                    on_done()
+                continue
+
+            reboot_marker = {
+                "index": i, "function": fname, "arguments": effective_args,
+                "result": {"status": "reboot_issued"}, "ok": True, "reboot": True,
+            }
+            _emit(
+                step_callback, print_logs,
+                f"{prefix}Step {i}/{total}: {fname}({json.dumps(effective_args, default=str)}) "
+                "— saving checkpoint and rebooting…",
+            )
+            # Persist BEFORE issuing the reboot (in case delay_seconds is 0).
+            on_reboot(i, results + [reboot_marker])
+            fn = tool_functions.get(fname)
+            if fn is not None:
+                try:
+                    fn(**effective_args)
+                except Exception:  # noqa: BLE001 - process is about to restart
+                    pass
+            if on_done:
+                on_done()
+            raise _RebootIssued()
 
         save_path = effective_args.get("save_path")
         if isinstance(save_path, str):

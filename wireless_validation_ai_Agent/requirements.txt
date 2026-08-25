@@ -12,3 +12,6 @@ Pillow
 soundcard
 numpy
 scipy
+pywin32
+pytesseract
+pywinauto

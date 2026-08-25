@@ -1,6 +1,8 @@
 import sys
 from flask import Flask, render_template, request, jsonify
-from ai_agent import _run_agent_turn, base_url
+from ai_agent import _run_agent_turn, base_url, ALL_TOOL_FUNCTIONS, _generate_ai_report, SCRIPT_DIR
+from ai_task_runner import run_test_script
+from ai_task_state_manager import has_runner_state, load_runner_state
 import threading
 import uuid
 import os
@@ -272,15 +274,25 @@ def _wait_for_system_ready(timeout: int = 600) -> None:
 
 
 def _resume_pending_task_after_reboot() -> None:
-    """If an unfinished task was saved before a reboot, auto-resume it on startup."""
+    """If a test script was interrupted by a reboot step, resume it on startup.
+
+    The runner saved a checkpoint (ai_task_state_manager.runner_state.json) describing the
+    script, round, and next step. We continue it deterministically — no LLM — via
+    run_test_script(resume_state=...), reusing the same report folder.
+    """
     global active_request_id
-    if get_resume_prompt() is None:
+    if not has_runner_state():
         return
-    # Give the OS time to finish logon and bring up services/network first.
+    # Give the OS time to finish logon and bring up services/network first
+    # (report generation + Echo analysis may need the network).
     _wait_for_system_ready()
-    resume_prompt = get_resume_prompt()
-    if not resume_prompt:
+    state = load_runner_state()
+    if not state:
         return
+
+    script = state.get("script") or {}
+    rounds = int(state.get("rounds", 1) or 1)
+    task = state.get("task", "test")
 
     request_id = str(uuid.uuid4())
     with request_states_lock:
@@ -290,17 +302,58 @@ def _resume_pending_task_after_reboot() -> None:
             "progress": [],
             "reply": "",
             "error": "",
-            "user_text": "[Auto-resume after reboot]",
+            "user_text": f"[Auto-resume test after reboot] {task}",
             "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "ended_at": "",
         }
-    worker = threading.Thread(
-        target=_run_chat_request,
-        args=(request_id, resume_prompt, False),
-        daemon=True,
-    )
+
+    def _step_logger(step_text: str) -> None:
+        with request_states_lock:
+            st = request_states.get(request_id)
+            if st:
+                st["progress"].append({
+                    "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    "text": step_text,
+                })
+
+    def _worker() -> None:
+        try:
+            reply = run_test_script(
+                script,
+                tool_functions=ALL_TOOL_FUNCTIONS,
+                rounds=rounds,
+                step_callback=_step_logger,
+                print_logs=True,
+                script_dir=SCRIPT_DIR,
+                report_generator=_generate_ai_report,
+                resume_state=state,
+            )
+            with request_states_lock:
+                st = request_states.get(request_id)
+                if st:
+                    st["status"] = "done"
+                    st["reply"] = reply
+                    st["ended_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    _append_history_item({
+                        "request_id": request_id,
+                        "status": "done",
+                        "user_text": st.get("user_text", ""),
+                        "started_at": st.get("started_at", ""),
+                        "ended_at": st.get("ended_at", ""),
+                        "progress": st.get("progress", []),
+                        "reply": reply,
+                    })
+        except Exception as e:  # noqa: BLE001
+            with request_states_lock:
+                st = request_states.get(request_id)
+                if st:
+                    st["status"] = "error"
+                    st["error"] = str(e)
+                    st["ended_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    worker = threading.Thread(target=_worker, daemon=True)
     worker.start()
-    print("[TASK RECOVERY] Resuming unfinished task from previous session...")
+    print("[TASK RECOVERY] Resuming interrupted test script from checkpoint...")
 
 
 if __name__ == '__main__':
@@ -323,4 +376,7 @@ if __name__ == '__main__':
                 pass
 
     _th.Timer(1.2, _open_browser).start()
+    # Resume an interrupted test script (if a reboot checkpoint exists) without
+    # blocking server startup; the resume worker waits for the network itself.
+    _th.Thread(target=_resume_pending_task_after_reboot, daemon=True).start()
     app.run(debug=False, host='127.0.0.1', port=5000)

@@ -31,16 +31,53 @@ _NOT_ADMIN_HINT = (
     "Running 'python web_ui.py' from a normal terminal is NOT elevated."
 )
 
+# pnputil success codes that mean the operation completed but Windows needs a
+# reboot to finish. 3010 = ERROR_SUCCESS_REBOOT_REQUIRED, 1641 = ERROR_SUCCESS_REBOOT_INITIATED.
+_REBOOT_REQUIRED_CODES = (3010, 1641)
 
-def install_isst_driver(inf_path: str) -> dict:
-    """Install the ISST driver from a .inf file using pnputil.
 
-    Args:
-        inf_path: The full path to the .inf driver file to install.
+def _uninstall_needs_reboot(return_code: int, output: str) -> bool:
+    """True if a pnputil delete/uninstall result indicates a reboot-pending success."""
+    text = (output or "").lower()
+    return return_code in _REBOOT_REQUIRED_CODES or "reboot" in text or "restart" in text
 
-    Returns:
-        A dict with status and details of the installation result.
+
+def _read_inf_text(inf_path: str) -> str:
+    """Read an INF as text, honoring its BOM (INFs are often UTF-16 LE)."""
+    with open(inf_path, "rb") as fh:
+        raw = fh.read()
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16", errors="ignore")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig", errors="ignore")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1", errors="ignore")
+
+
+def _is_extension_inf(inf_path: str) -> bool:
+    """Return True if the INF declares ``Class = Extension``.
+
+    Extension-class INFs (e.g. IntelMvaExtension.inf) cannot be installed on their
+    own with ``pnputil /add-driver /install``: they only attach to an already
+    matched primary device, so a standalone install often reports a non-zero code.
+    Detecting them lets the bulk installer treat such failures as non-fatal.
     """
+    try:
+        for line in _read_inf_text(inf_path).splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("class") and "=" in stripped:
+                key, value = stripped.split("=", 1)
+                if key.strip().lower() == "class" and value.strip().strip('"').lower() == "extension":
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _install_inf(inf_path: str) -> dict:
+    """Install a single .inf via pnputil (internal helper for install_all_isst_drivers)."""
     try:
         if not inf_path or not inf_path.lower().endswith(".inf"):
             return {"error": "A valid .inf file path must be provided."}
@@ -71,10 +108,27 @@ def install_isst_driver(inf_path: str) -> dict:
             or "up-to-date" in output.lower()
         )
 
+        # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED, 1641 = ERROR_SUCCESS_REBOOT_INITIATED.
+        # These are SUCCESS codes: the driver installed but Windows needs a reboot to
+        # finish binding it (common for the primary IntcAudioBus.inf on a live device).
+        reboot_required = (
+            result.returncode in (3010, 1641)
+            or "reboot" in output.lower()
+            or "restart" in output.lower()
+        )
+
         if result.returncode == 0:
             return {
                 "status": "success",
                 "message": "ISST driver installed successfully.",
+                "output": output,
+            }
+        elif reboot_required:
+            return {
+                "status": "success",
+                "message": "ISST driver installed; a reboot is required to complete installation.",
+                "reboot_required": True,
+                "return_code": result.returncode,
                 "output": output,
             }
         elif already_present:
@@ -98,7 +152,12 @@ def install_isst_driver(inf_path: str) -> dict:
         return {"error": str(e)}
 
 
-def install_all_isst_drivers(driver_folder: str, recursive: bool = True) -> dict:
+def install_all_isst_drivers(
+    driver_folder: str,
+    recursive: bool = True,
+    ignore_infs: list | None = None,
+    ignore_extension_inf_failures: bool = True,
+) -> dict:
     """Install EVERY ``.inf`` file found under a driver folder using pnputil.
 
     This is the reliable way to satisfy "install ALL .inf files" — instead of
@@ -107,15 +166,28 @@ def install_all_isst_drivers(driver_folder: str, recursive: bool = True) -> dict
     installs every ``.inf`` automatically. By default it searches subfolders too,
     so both ``Drivers`` and ``Extensions`` INFs under the folder are included.
 
+    Some INFs cannot be installed standalone and will always report a failure —
+    most notably ``Class = Extension`` INFs (e.g. ``IntelMvaExtension.inf``), which
+    only attach to an already-matched primary device. Such failures are expected
+    and non-fatal, so by default they are recorded as ``ignored`` and do NOT fail
+    the overall install. Use ``ignore_infs`` to whitelist additional INF names.
+
     Args:
         driver_folder: Path to the folder containing the ``.inf`` files (e.g. the
             version's ``Production`` or ``QS_Cert`` folder, or its ``Drivers``
             subfolder).
         recursive: When True (default), also install ``.inf`` files in nested
             subfolders (e.g. ``Extensions/OemExtensionInfs/...``).
+        ignore_infs: Optional list of INF file names (e.g. ``"IntelMvaExtension.inf"``)
+            whose install failures should be treated as non-fatal (``ignored``)
+            instead of failing the overall result. Matching is case-insensitive.
+        ignore_extension_inf_failures: When True (default), any INF that declares
+            ``Class = Extension`` and fails to install is treated as ``ignored``
+            rather than ``failed``.
 
     Returns:
-        A dict with an overall status plus per-file installation results.
+        A dict with an overall status plus per-file installation results. The
+        overall status is ``success`` when no non-ignored INF failed.
     """
     try:
         if not driver_folder or not isinstance(driver_folder, str):
@@ -149,85 +221,73 @@ def install_all_isst_drivers(driver_folder: str, recursive: bool = True) -> dict
                 "driver_folder": driver_folder,
             }
 
+        ignore_set = {
+            name.strip().lower()
+            for name in (ignore_infs or [])
+            if isinstance(name, str) and name.strip()
+        }
+
         results = []
         installed = 0
+        ignored = 0
+        failed = 0
+        reboot_required = False
         for inf_path in inf_paths:
-            res = install_isst_driver(inf_path)
-            ok = res.get("status") == "success"
-            if ok:
+            inf_name = os.path.basename(inf_path)
+            is_extension = _is_extension_inf(inf_path)
+            res = _install_inf(inf_path)
+            status = res.get("status", "error" if res.get("error") else "unknown")
+            inf_reboot = bool(res.get("reboot_required"))
+            if inf_reboot:
+                reboot_required = True
+
+            if status == "success":
                 installed += 1
+                outcome = "success"
+            elif inf_name.lower() in ignore_set or (ignore_extension_inf_failures and is_extension):
+                ignored += 1
+                outcome = "ignored"
+            else:
+                failed += 1
+                outcome = "failed"
+
             results.append({
                 "inf_path": inf_path,
-                "inf_name": os.path.basename(inf_path),
-                "status": res.get("status", "error" if res.get("error") else "unknown"),
+                "inf_name": inf_name,
+                "status": status,
+                "outcome": outcome,
+                "is_extension": is_extension,
+                "reboot_required": inf_reboot,
+                "return_code": res.get("return_code"),
                 "message": res.get("message") or res.get("error", ""),
+                "output": res.get("output", ""),
+                "error_output": res.get("error_output", ""),
             })
 
         total = len(inf_paths)
-        overall = "success" if installed == total else "failed"
+        overall = "success" if failed == 0 else "failed"
+        summary = f"Installed {installed}/{total} .inf file(s)"
+        if ignored:
+            summary += f", ignored {ignored} non-fatal failure(s)"
+        if reboot_required:
+            summary += ", reboot required to complete installation"
+        summary += f" from '{driver_folder}'."
         return {
             "status": overall,
-            "message": f"Installed {installed}/{total} .inf file(s) from '{driver_folder}'.",
+            "message": summary,
             "driver_folder": driver_folder,
             "total": total,
             "installed": installed,
+            "ignored": ignored,
+            "failed": failed,
+            "reboot_required": reboot_required,
+            "ignored_infs": [r["inf_name"] for r in results if r["outcome"] == "ignored"],
+            "failed_infs": [r["inf_name"] for r in results if r["outcome"] == "failed"],
+            "reboot_required_infs": [r["inf_name"] for r in results if r["reboot_required"]],
             "results": results,
         }
     except Exception as e:
         return {"error": str(e)}
-
-
-def _resolve_published_names(inf_name: str) -> list[str]:
-    """Resolve one or more published oem*.inf names from a driver name.
-
-    If inf_name is already a published name (e.g. 'oem123.inf'), return it as-is.
-    If inf_name is an original name (e.g. 'IntcBTAu.inf'), enumerate all installed
-    drivers and return every published name whose original INF matches.
-
-    Args:
-        inf_name: Either a published name ('oem*.inf') or an original INF name.
-
-    Returns:
-        A list of matching published driver names, or an empty list if none found.
-    """
-    if inf_name.lower().startswith("oem"):
-        return [inf_name]
-
-    try:
-        result = subprocess.run(
-            ["pnputil", "/enum-drivers"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if result.returncode != 0:
-            return []
-
-        published_names = []
-        current = {}
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                if current:
-                    orig = current.get("Original Name", "")
-                    pub = current.get("Published Name", "")
-                    if orig.lower() == inf_name.lower() and pub:
-                        published_names.append(pub)
-                    current = {}
-                continue
-            if ":" in line:
-                key, _, value = line.partition(":")
-                current[key.strip()] = value.strip()
-        # Handle last block (no trailing blank line)
-        if current:
-            orig = current.get("Original Name", "")
-            pub = current.get("Published Name", "")
-            if orig.lower() == inf_name.lower() and pub:
-                published_names.append(pub)
-
-        return published_names
-    except Exception:
-        return []
 
 
 def _verify_deleted(published_names: list[str]) -> list[str]:
@@ -252,102 +312,6 @@ def _verify_deleted(published_names: list[str]) -> list[str]:
         return [p for p in published_names if p.lower() in still_present]
     except Exception:
         return published_names  # assume worst-case on any error
-
-
-def uninstall_isst_driver(inf_name: str) -> dict:
-    """Uninstall the ISST driver from the system using pnputil with force.
-
-    Accepts either a published driver name (e.g., 'oem123.inf') or an original
-    INF name (e.g., 'IntcBTAu.inf'). When an original name is given, all installed
-    driver packages with that original name are resolved and removed. Uses both
-    /force and /uninstall flags so that devices bound to the driver are also removed.
-
-    Args:
-        inf_name: The published driver name (e.g., 'oem123.inf') or original INF
-                  name (e.g., 'IntcBTAu.inf') to uninstall.
-
-    Returns:
-        A dict with status and details of the uninstallation result.
-    """
-    try:
-        if not inf_name or not inf_name.lower().endswith(".inf"):
-            return {"error": "A valid .inf driver name must be provided (e.g., 'oem123.inf' or 'IntcBTAu.inf')."}
-
-        if not _is_admin():
-            return {"status": "failed", "error": _NOT_ADMIN_HINT}
-
-        # Resolve to published oem*.inf name(s)
-        published_names = _resolve_published_names(inf_name)
-
-        if not published_names:
-            return {
-                "status": "failed",
-                "message": f"Could not find any installed driver matching '{inf_name}'.",
-            }
-
-        results = []
-        overall_success = True
-
-        for pub_name in published_names:
-            result = subprocess.run(
-                ["pnputil", "/delete-driver", pub_name, "/uninstall", "/force"],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-
-            entry = {
-                "published_name": pub_name,
-                "return_code": result.returncode,
-                "output": result.stdout.strip(),
-                "error_output": result.stderr.strip(),
-            }
-
-            if result.returncode == 0:
-                entry["status"] = "success"
-            else:
-                entry["status"] = "failed"
-                overall_success = False
-
-            results.append(entry)
-
-        # Post-deletion verification: re-enumerate to confirm removal
-        still_present = _verify_deleted(published_names)
-        for entry in results:
-            entry["verified_deleted"] = entry["published_name"].lower() not in [
-                p.lower() for p in still_present
-            ]
-
-        verified_failed = [r["published_name"] for r in results if not r["verified_deleted"]]
-
-        if not verified_failed and overall_success:
-            return {
-                "status": "success",
-                "message": f"ISST driver(s) uninstalled and verified deleted ({len(results)} package(s) removed).",
-                "results": results,
-            }
-        elif verified_failed:
-            return {
-                "status": "failed",
-                "message": (
-                    f"Uninstall command ran but {len(verified_failed)} package(s) are still present "
-                    f"in the driver store: {verified_failed}. "
-                    "This usually means the process lacks Administrator privileges."
-                ),
-                "still_present": verified_failed,
-                "results": results,
-            }
-        else:
-            cmd_failed = [r["published_name"] for r in results if r["status"] == "failed"]
-            return {
-                "status": "failed",
-                "message": f"Some driver packages could not be uninstalled: {cmd_failed}",
-                "results": results,
-            }
-    except subprocess.TimeoutExpired:
-        return {"error": "Driver uninstallation timed out after 120 seconds."}
-    except Exception as e:
-        return {"error": str(e)}
 
 
 # Exact original INF names that belong to the Intel SST driver package (matching
@@ -432,6 +396,14 @@ def uninstall_all_isst_drivers() -> dict:
     each with pnputil using /uninstall and /force so bound devices are also removed.
     Deletion is then verified by re-enumerating the driver store.
 
+    A pnputil reboot-required code (3010 = ERROR_SUCCESS_REBOOT_REQUIRED, 1641 =
+    ERROR_SUCCESS_REBOOT_INITIATED) is treated as SUCCESS: the uninstall completed
+    but Windows needs a reboot to finish. Such packages may still appear in the
+    driver store until the reboot, so they are reported as 'reboot_pending' and
+    counted as removed rather than failed. When any package needs a reboot the
+    overall result sets 'reboot_required': true; callers should reboot before
+    reinstalling to avoid a half-removed driver state.
+
     Returns:
         A dict with an overall status plus per-package uninstall results.
     """
@@ -452,6 +424,7 @@ def uninstall_all_isst_drivers() -> dict:
         published_names = [m["published_name"] for m in matched]
         results = []
         overall_success = True
+        reboot_required = False
 
         for m in matched:
             pub_name = m["published_name"]
@@ -461,15 +434,20 @@ def uninstall_all_isst_drivers() -> dict:
                 text=True,
                 timeout=120,
             )
+            needs_reboot = _uninstall_needs_reboot(result.returncode, result.stdout)
+            if needs_reboot:
+                reboot_required = True
             entry = {
                 "published_name": pub_name,
                 "original_name": m["original_name"],
                 "return_code": result.returncode,
+                "reboot_required": needs_reboot,
                 "output": result.stdout.strip(),
                 "error_output": result.stderr.strip(),
-                "status": "success" if result.returncode == 0 else "failed",
+                # A reboot-required code (3010/1641) is a success that needs a reboot.
+                "status": "success" if (result.returncode == 0 or needs_reboot) else "failed",
             }
-            if result.returncode != 0:
+            if result.returncode != 0 and not needs_reboot:
                 overall_success = False
             results.append(entry)
 
@@ -477,22 +455,40 @@ def uninstall_all_isst_drivers() -> dict:
         still_present = _verify_deleted(published_names)
         still_present_lower = [p.lower() for p in still_present]
         for entry in results:
-            entry["verified_deleted"] = entry["published_name"].lower() not in still_present_lower
+            present = entry["published_name"].lower() in still_present_lower
+            entry["verified_deleted"] = not present
+            # A reboot-pending package may still appear in the store until reboot; not a failure.
+            entry["reboot_pending"] = bool(present and entry["reboot_required"])
 
-        verified_failed = [r["published_name"] for r in results if not r["verified_deleted"]]
-        removed = sum(1 for r in results if r["verified_deleted"])
+        # Only packages still present AND not reboot-pending are genuine failures.
+        verified_failed = [
+            r["published_name"] for r in results
+            if not r["verified_deleted"] and not r["reboot_pending"]
+        ]
+        # Count reboot-pending packages as removed: the uninstall succeeded, only the
+        # reboot is outstanding.
+        removed = sum(1 for r in results if r["verified_deleted"] or r["reboot_pending"])
 
         if not verified_failed and overall_success:
+            if reboot_required:
+                message = (
+                    f"All ISST driver packages uninstalled ({removed} package(s)); a reboot is "
+                    "required to complete removal. Reboot before reinstalling."
+                )
+            else:
+                message = f"All ISST driver packages uninstalled and verified deleted ({removed} removed)."
             return {
                 "status": "success",
                 "removed": removed,
-                "message": f"All ISST driver packages uninstalled and verified deleted ({removed} removed).",
+                "reboot_required": reboot_required,
+                "message": message,
                 "results": results,
             }
         elif verified_failed:
             return {
                 "status": "failed",
                 "removed": removed,
+                "reboot_required": reboot_required,
                 "message": (
                     f"Uninstall ran but {len(verified_failed)} package(s) are still present in the "
                     f"driver store: {verified_failed}. This usually means the process lacks "
@@ -506,6 +502,7 @@ def uninstall_all_isst_drivers() -> dict:
             return {
                 "status": "failed",
                 "removed": removed,
+                "reboot_required": reboot_required,
                 "message": f"Some ISST driver packages could not be uninstalled: {cmd_failed}",
                 "results": results,
             }
@@ -618,32 +615,18 @@ def get_isst_driver_version() -> dict:
 
 ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS = [
     {
-        "name": "install_isst_driver",
-        "description": (
-            "Install an ISST (Intel Smart Sound Technology) driver from a .inf file using pnputil. "
-            "Provide the full path to the .inf file. "
-            "Prefer the driver under the 'Production' subfolder; fall back to 'QS_Cert' if 'Production' is not available."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "inf_path": {
-                    "type": "string",
-                    "description": "Full path to the .inf driver file to install.",
-                },
-            },
-            "required": ["inf_path"],
-        },
-    },
-    {
         "name": "install_all_isst_drivers",
         "description": (
             "Install ALL .inf driver files found under a driver folder using pnputil. "
-            "Use this instead of calling install_isst_driver once per file: point it at the "
-            "version's driver folder (e.g. the 'Production' or 'QS_Cert' folder, or its 'Drivers' "
-            "subfolder) and it discovers and installs every .inf automatically. By default it "
-            "searches subfolders too, so both 'Drivers' and 'Extensions' INFs are included. "
-            "This is the reliable way to satisfy 'install all .inf files'."
+            "Point it at the version's driver folder (e.g. the 'Production' or 'QS_Cert' folder, "
+            "or its 'Drivers' subfolder) and it discovers and installs every .inf automatically. "
+            "By default it searches subfolders too, so both 'Drivers' and 'Extensions' INFs are "
+            "included. This is the reliable way to satisfy 'install all .inf files'. "
+            "A pnputil reboot-required code (3010/1641) is treated as SUCCESS: the driver is "
+            "installed but Windows needs a reboot to finish binding it (common for the primary "
+            "IntcAudioBus.inf). In that case the result sets 'reboot_required': true and lists "
+            "'reboot_required_infs'; this is NOT a failure. Only 'failed_infs' indicate real "
+            "install failures."
         ),
         "input_schema": {
             "type": "object",
@@ -662,30 +645,25 @@ ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS = [
                         "such as Extensions/OemExtensionInfs."
                     ),
                 },
-            },
-            "required": ["driver_folder"],
-        },
-    },
-    {
-        "name": "uninstall_isst_driver",
-        "description": (
-            "Uninstall an ISST driver from the system using pnputil with /force and /uninstall flags. "
-            "Accepts either a published driver name (e.g., 'oem123.inf') or an original INF name "
-            "(e.g., 'IntcBTAu.inf'). When an original name is given, all installed packages with "
-            "that name are automatically resolved and removed. Devices bound to the driver are also uninstalled."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "inf_name": {
-                    "type": "string",
+                "ignore_infs": {
+                    "type": "array",
+                    "items": {"type": "string"},
                     "description": (
-                        "The published driver name (e.g., 'oem123.inf') or original INF name "
-                        "(e.g., 'IntcBTAu.inf') to uninstall."
+                        "Optional list of INF file names (e.g. 'IntelMvaExtension.inf') whose "
+                        "install failures should be treated as non-fatal (recorded as 'ignored') "
+                        "instead of failing the overall result. Matching is case-insensitive."
+                    ),
+                },
+                "ignore_extension_inf_failures": {
+                    "type": "boolean",
+                    "description": (
+                        "When true (default), any INF declaring 'Class = Extension' (such as "
+                        "IntelMvaExtension.inf) that fails to install is treated as 'ignored' "
+                        "rather than 'failed'. Extension INFs cannot be installed standalone."
                     ),
                 },
             },
-            "required": ["inf_name"],
+            "required": ["driver_folder"],
         },
     },
     {
@@ -696,17 +674,13 @@ ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS = [
             "starting with 'intc' plus the companion INFs DetectionVerificationDrv, LT6911Au and "
             "IntelMvaExtension) and removes each with pnputil /uninstall /force, then verifies deletion. "
             "Use this to fully clear ISST drivers without listing each INF name by hand. Requires "
-            "Administrator privileges."
+            "Administrator privileges. "
+            "A pnputil reboot-required code (3010/1641) is treated as SUCCESS: the uninstall completed "
+            "but Windows needs a reboot to finish. In that case the result sets 'reboot_required': true "
+            "and the affected package(s) are marked 'reboot_pending' (still in the store until reboot) "
+            "and counted as removed, NOT failed. When 'reboot_required' is true you MUST reboot before "
+            "reinstalling the drivers, otherwise the reinstall runs against a half-removed driver state."
         ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "name": "check_isst_driver_status",
-        "description": "Check the current installation status of the ISST driver on this system.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -737,9 +711,7 @@ ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS = [
 ]
 
 ISST_DRIVER_INSTALL_TOOL_FUNCTIONS = {
-    "install_isst_driver": install_isst_driver,
     "install_all_isst_drivers": install_all_isst_drivers,
-    "uninstall_isst_driver": uninstall_isst_driver,
     "uninstall_all_isst_drivers": uninstall_all_isst_drivers,
     "get_isst_driver_version": get_isst_driver_version,
 }

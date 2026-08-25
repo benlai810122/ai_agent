@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="980" viewBox="0 0 1800 980">
+  <defs>
+    <style>
+      .bg { fill: #f4f7fb; }
+      .title { font: 700 34px 'Segoe UI', Tahoma, sans-serif; fill: #0f2a3d; }
+      .subtitle { font: 500 17px 'Segoe UI', Tahoma, sans-serif; fill: #2d4a5f; }
+      .stepbox { fill: #ffffff; stroke: #2f5d7c; stroke-width: 2.6; rx: 14; ry: 14; }
+      .echobox { fill: #f2f8ff; stroke: #1c6ed0; stroke-width: 2.8; rx: 14; ry: 14; }
+      .stepnum { font: 800 22px 'Segoe UI', Tahoma, sans-serif; fill: #14415c; }
+      .steptitle { font: 700 20px 'Segoe UI', Tahoma, sans-serif; fill: #11344a; }
+      .body { font: 500 16px 'Segoe UI', Tahoma, sans-serif; fill: #1f4259; }
+      .file { font: 700 15px 'Consolas', 'Courier New', monospace; fill: #0f577f; }
+      .line { stroke: #456178; stroke-width: 2.6; fill: none; }
+      .note { font: 600 15px 'Segoe UI', Tahoma, sans-serif; fill: #3a5265; }
+      .badgeText { font: 800 13px 'Segoe UI', Tahoma, sans-serif; fill: #ffffff; }
+      .legendText { font: 700 14px 'Segoe UI', Tahoma, sans-serif; fill: #1f4259; }
+      .fallback { fill: #fff7ed; stroke: #d67c1c; stroke-width: 2.2; stroke-dasharray: 8 5; rx: 12; ry: 12; }
+      .fallbackText { font: 600 15px 'Segoe UI', Tahoma, sans-serif; fill: #8a4b12; }
+      .bigCost { font: 900 26px 'Segoe UI', Tahoma, sans-serif; fill: #1c6ed0; }
+      .bigCostSub { font: 700 17px 'Segoe UI', Tahoma, sans-serif; fill: #1f4259; }
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 z" fill="#456178"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1800" height="980"/>
+
+  <text x="70" y="64" class="title">Echo MCP &#8594; Detailed Summary &amp; Final Report Flow</text>
+
+  <!-- Legend -->
+  <circle cx="1120" cy="72" r="12" fill="#d62828"/>
+  <text x="1140" y="77" class="legendText">Agent Token Cost</text>
+  <circle cx="1320" cy="72" r="12" fill="#2a9d4a"/>
+  <text x="1340" y="77" class="legendText">0 Agent Token</text>
+  <circle cx="1500" cy="72" r="12" fill="#1c6ed0"/>
+  <text x="1520" y="77" class="legendText">Echo MCP (server-side)</text>
+
+  <!-- Step 1 -->
+  <rect class="stepbox" x="70" y="140" width="780" height="130"/>
+  <text x="95" y="180" class="stepnum">Step 1</text>
+  <text x="210" y="180" class="steptitle">Test runner finishes &#8212; collect results</text>
+  <text x="210" y="208" class="body">Setup / steps &#215; rounds / teardown done; per-round results + errors gathered.</text>
+  <text x="210" y="234" class="file">Module: ai_task_runner.py</text>
+  <circle cx="110" cy="242" r="18" fill="#2a9d4a"/>
+  <text x="102" y="247" class="badgeText">0</text>
+
+  <!-- Step 2 -->
+  <rect class="stepbox" x="960" y="140" width="770" height="130"/>
+  <text x="985" y="180" class="stepnum">Step 2</text>
+  <text x="1100" y="180" class="steptitle">Build deterministic raw_report</text>
+  <text x="1100" y="208" class="body">Plain-Python markdown from the results &#8212; the ground-truth source of truth.</text>
+  <text x="1100" y="234" class="file">ai_task_runner.py (_build_report_content)</text>
+  <circle cx="1000" cy="242" r="18" fill="#2a9d4a"/>
+  <text x="992" y="247" class="badgeText">0</text>
+
+  <!-- Step 3 -->
+  <rect class="echobox" x="960" y="350" width="770" height="160"/>
+  <text x="985" y="392" class="stepnum">Step 3</text>
+  <text x="1100" y="392" class="steptitle">Send raw_report to Echo MCP</text>
+  <text x="1100" y="420" class="body">analyze_test_result() calls the echo_chat tool over the SSE transport.</text>
+  <text x="1100" y="446" class="file">ai_echo_mcp_api.py &#8594; echo-backend.intel.com/mcp/sse</text>
+  <text x="1100" y="472" class="note">0 agent tokens &#8212; Echo does its own reasoning server-side.</text>
+  <circle cx="1000" cy="486" r="18" fill="#1c6ed0"/>
+  <text x="988" y="491" class="badgeText">ECHO</text>
+
+  <!-- Step 4 -->
+  <rect class="echobox" x="70" y="350" width="780" height="160"/>
+  <text x="95" y="392" class="stepnum">Step 4</text>
+  <text x="210" y="392" class="steptitle">Echo returns an expert analysis</text>
+  <text x="210" y="420" class="body">Verdict, key observations, likely root cause, recommended next steps.</text>
+  <text x="210" y="446" class="file">stored in run_data["echo_analysis"]</text>
+  <text x="210" y="472" class="note">Second, independent pass over the raw results.</text>
+  <circle cx="110" cy="486" r="18" fill="#1c6ed0"/>
+  <text x="98" y="491" class="badgeText">ECHO</text>
+
+  <!-- Fallback callout -->
+  <rect class="fallback" x="960" y="540" width="770" height="52"/>
+  <text x="985" y="572" class="fallbackText">If Echo is unreachable (off-VPN): skip gracefully &#8594; echo_analysis = None, run continues.</text>
+
+  <!-- Step 5 -->
+  <rect class="stepbox" x="70" y="640" width="780" height="150"/>
+  <text x="95" y="680" class="stepnum">Step 5</text>
+  <text x="210" y="680" class="steptitle">AI builds the final-report prompt</text>
+  <text x="210" y="708" class="body">Prompt = raw run data + Echo analysis block + report-format skill.</text>
+  <text x="210" y="734" class="file">ai_agent.py (_generate_ai_report + _echo_analysis_block)</text>
+  <text x="210" y="758" class="body">The model now has TWO inputs: facts + Echo's analysis.</text>
+  <circle cx="110" cy="762" r="18" fill="#d62828"/>
+  <text x="94" y="767" class="badgeText">TOKEN</text>
+
+  <!-- Step 6 -->
+  <rect class="stepbox" x="960" y="640" width="770" height="150"/>
+  <text x="985" y="680" class="stepnum">Step 6</text>
+  <text x="1100" y="680" class="steptitle">AI writes final report + summary</text>
+  <text x="1100" y="708" class="body">Richer, actionable summary incorporating Echo's findings.</text>
+  <text x="1100" y="734" class="file">Saved: report/report_*/report_*.md</text>
+  <text x="1100" y="758" class="body">Checkpoint cleared; run complete.</text>
+  <circle cx="1000" cy="762" r="18" fill="#d62828"/>
+  <text x="984" y="767" class="badgeText">TOKEN</text>
+
+  <!-- Flow arrows -->
+  <path class="line" d="M850 205 L960 205" marker-end="url(#arrow)"/>
+  <path class="line" d="M1345 270 L1345 350" marker-end="url(#arrow)"/>
+  <path class="line" d="M960 430 L850 430" marker-end="url(#arrow)"/>
+  <path class="line" d="M460 510 L460 640" marker-end="url(#arrow)"/>
+  <path class="line" d="M850 715 L960 715" marker-end="url(#arrow)"/>
+
+  <text x="870" y="198" class="note">next</text>
+  <text x="1358" y="318" class="note">analyze</text>
+  <text x="868" y="422" class="note">result</text>
+  <text x="474" y="585" class="note">feed AI</text>
+  <text x="870" y="708" class="note">write</text>
+
+  <!-- Bottom banner -->
+  <rect x="70" y="820" width="1660" height="120" fill="#eef5ff" stroke="#1c6ed0" stroke-width="4" rx="14" ry="14"/>
+  <text x="110" y="866" class="bigCost">Echo adds an expert analysis BEFORE the AI writes the report.</text>
+  <text x="110" y="902" class="bigCostSub">The final summary is grounded in the run data AND Echo's verdict / root-cause / next-steps &#8212; more detailed than results alone,</text>
+  <text x="110" y="926" class="bigCostSub">while costing 0 agent tokens for the analysis step (only the raw text is added to the single report-generation call).</text>
+
+</svg>

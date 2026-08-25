@@ -98,6 +98,10 @@ from tools.driver_install_tools.isst_driver_install_ai_agent_tools import (
     ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS,
     ISST_DRIVER_INSTALL_TOOL_FUNCTIONS,
 )
+from tools.driver_install_tools.bluetooth_driver_install_ai_agnet_tools import (
+    BLUETOOTH_DRIVER_INSTALL_ANTHROPIC_TOOLS,
+    BLUETOOTH_DRIVER_INSTALL_TOOL_FUNCTIONS,
+)
 from tools.wrt_tools.wrt_ai_agent_tools import (
     WRT_ANTHROPIC_TOOLS,
     WRT_TOOL_FUNCTIONS,
@@ -109,6 +113,10 @@ from tools.dexarm_tools.dexarm_ai_agent_tools import (
 from tools.teams_tools.teams_ai_agent_tools import (
     TEAMS_ANTHROPIC_TOOLS,
     TEAMS_TOOL_FUNCTIONS,
+)
+from tools.ics_icps_tools.ics_ai_agent_tools import (
+    ICS_ANTHROPIC_TOOLS,
+    ICS_TOOL_FUNCTIONS,
 )
 
 # ---------------------------------------------------------------------------
@@ -178,9 +186,11 @@ ALL_ANTHROPIC_TOOLS = (
     + MOUSE_KEYBOARD_ANTHROPIC_TOOLS
     + POWER_STATE_ANTHROPIC_TOOLS
     + ISST_DRIVER_INSTALL_ANTHROPIC_TOOLS
+    + BLUETOOTH_DRIVER_INSTALL_ANTHROPIC_TOOLS
     + WRT_ANTHROPIC_TOOLS
     + DEXARM_ANTHROPIC_TOOLS
     + TEAMS_ANTHROPIC_TOOLS
+    + ICS_ANTHROPIC_TOOLS
 )
 
 TOOL_IMPLEMENTATIONS = {
@@ -193,9 +203,11 @@ TOOL_IMPLEMENTATIONS = {
     **MOUSE_KEYBOARD_TOOL_FUNCTIONS,
     **POWER_STATE_TOOL_FUNCTIONS,
     **ISST_DRIVER_INSTALL_TOOL_FUNCTIONS,
+    **BLUETOOTH_DRIVER_INSTALL_TOOL_FUNCTIONS,
     **WRT_TOOL_FUNCTIONS,
     **DEXARM_TOOL_FUNCTIONS,
     **TEAMS_TOOL_FUNCTIONS,
+    **ICS_TOOL_FUNCTIONS,
 }
 
 
@@ -591,6 +603,63 @@ PENDING_TEST_CONFIRMATIONS = {}
 PENDING_TEST_SCRIPTS = {}  # Planned test scripts awaiting user confirmation
 
 
+def _plan_and_confirm(
+    messages: list,
+    goal_text: str,
+    session_key,
+    *,
+    step_callback=None,
+    print_tool_logs: bool = True,
+    replan_note: str | None = None,
+) -> str:
+    """Plan tools/skills/flow, generate a runnable script, store it as pending,
+    and return the confirmation reply.
+
+    Shared by the initial test request and by the re-planning paths (user replied
+    "yes"/"no" but added extra conditions), so the script is always rebuilt the
+    same way and shown for confirmation again.
+    """
+    if replan_note:
+        _emit(step_callback, print_tool_logs, replan_note)
+    _emit(
+        step_callback,
+        print_tool_logs,
+        "[Planning] Analyzing your request and building the test plan — "
+        "picking the right tools and skills… this can take a moment.",
+    )
+    selected_tools, selected_names, selected_skills, flow, assessment = (
+        select_tools_for_task(goal_text)
+    )
+    _emit(
+        step_callback,
+        print_tool_logs,
+        "[Planning] Gathering device info and generating the concrete test "
+        "script with proper parameters…",
+    )
+    script_obj, script_path = generate_test_script(
+        goal_text, selected_tools, flow, selected_skills
+    )
+    _emit(step_callback, print_tool_logs, "[Planning] Finalizing the test plan…")
+    rounds = _parse_rounds(goal_text)
+    plan_block = format_plan_for_reply(
+        script_obj, script_path, selected_skills, flow, assessment, rounds
+    )
+
+    PENDING_TEST_CONFIRMATIONS[session_key] = goal_text
+    PENDING_TEST_SCRIPTS[session_key] = {
+        "script": script_obj,
+        "path": script_path,
+        "skills": selected_skills,
+    }
+    confirmation_prompt = (
+        "\n\n---\n"
+        "**Ready to start?** Please reply **yes** to begin or **no** to cancel."
+    )
+    reply = plan_block + confirmation_prompt
+    messages.append({"role": "assistant", "content": reply})
+    return reply
+
+
 def _run_agent_turn(
     messages: list,
     user_text: str,
@@ -610,14 +679,32 @@ def _run_agent_turn(
             plan = PENDING_TEST_SCRIPTS.pop(session_key, None)
             PENDING_TEST_CONFIRMATIONS.pop(session_key, None)
             script = (plan or {}).get("script") or {}
-
-            # Deterministic path: with a concrete script and no extra instructions,
-            # run the steps directly by calling each tool function — no LLM, so no
-            # token cost. The model was only used to PLAN the script.
             has_runnable = bool(
                 script.get("setup") or script.get("steps") or script.get("teardown")
             )
-            if has_runnable and not extra_instruction:
+
+            # Case 3: "yes" WITH additional conditions — don't run the current
+            # script. Re-create it so the new conditions are incorporated, then
+            # ask for confirmation again.
+            if extra_instruction:
+                combined_goal = (
+                    f"{pending_request}\n\n"
+                    f"Additional conditions to incorporate: {extra_instruction}"
+                )
+                messages.append({"role": "user", "content": user_text})
+                return _plan_and_confirm(
+                    messages,
+                    combined_goal,
+                    session_key,
+                    step_callback=step_callback,
+                    print_tool_logs=print_tool_logs,
+                    replan_note="[Planning] Updating the test script with your "
+                    "additional conditions…",
+                )
+
+            # Case 1: plain "yes" — run the pre-planned script deterministically
+            # by calling each tool function in order. No LLM, so no token cost.
+            if has_runnable:
                 rounds = _parse_rounds(pending_request)
                 messages.append({"role": "user", "content": user_text})
                 reply = run_test_script(
@@ -632,51 +719,51 @@ def _run_agent_turn(
                 messages.append({"role": "assistant", "content": reply})
                 return reply
 
-            # Fallback: let the LLM agent execute (e.g. the user added extra
-            # instructions, or no runnable script was produced).
+            # No runnable script was produced — let the LLM agent execute.
             confirmed_execution = True
-            extra_clause = (
-                f" Additionally: {extra_instruction}." if extra_instruction else ""
-            )
-            script_clause = ""
-            if script.get("steps"):
-                script_clause = (
-                    " Follow this pre-planned test script (adjust arguments only if "
-                    "the live system state requires it):\n"
-                    + json.dumps(script, indent=2)
-                )
             user_text = (
-                f"User confirmed to proceed. Execute this test plan now: {pending_request}.{extra_clause}"
-                f"{script_clause} "
+                f"User confirmed to proceed. Execute this test plan now: "
+                f"{pending_request}. "
                 "Use tools as needed and report each major step result."
             )
 
         elif decision == "no":
             PENDING_TEST_CONFIRMATIONS.pop(session_key, None)
             PENDING_TEST_SCRIPTS.pop(session_key, None)
+
+            # Case 4: "no" WITH additional conditions — the previous plan is
+            # rejected. Re-create the test script from those conditions and ask
+            # for confirmation again.
             if extra_instruction:
-                # User cancelled but left a follow-up request — handle it fresh.
+                revised_goal = (
+                    f"{pending_request}\n\n"
+                    "The previously planned test was rejected. Re-create it with "
+                    f"these changes: {extra_instruction}"
+                )
                 messages.append({"role": "user", "content": user_text})
-                messages.append(
-                    {"role": "assistant", "content": "Test execution cancelled."}
-                )
-                return _run_agent_turn(
+                return _plan_and_confirm(
                     messages,
-                    extra_instruction,
-                    print_tool_logs=print_tool_logs,
-                    require_test_confirmation=require_test_confirmation,
+                    revised_goal,
+                    session_key,
                     step_callback=step_callback,
+                    print_tool_logs=print_tool_logs,
+                    replan_note="[Planning] Re-creating the test script based on "
+                    "your new conditions…",
                 )
+
+            # Case 2: plain "no" — cancel.
             cancel_reply = "Test execution cancelled. Let me know if you'd like to try something else."
             messages.append({"role": "user", "content": user_text})
             messages.append({"role": "assistant", "content": cancel_reply})
             return cancel_reply
 
         else:
+            # Case 5: a reply that doesn't start with yes/no — remind the user to
+            # decide whether to run the test.
             reminder_reply = (
                 "A test plan is waiting for your confirmation. "
-                'Please reply **yes** to start the test (you can also add extra instructions, e.g. "yes, but also check the mic") '
-                'or **no** to cancel (you can also add a new request, e.g. "no, please just check Bluetooth status").'
+                'Please reply **yes** to start the test (you can also add extra conditions, e.g. "yes, but also check the mic", to rebuild the script) '
+                'or **no** to cancel (you can also add new conditions, e.g. "no, run it 5 times instead", to rebuild the script).'
             )
             messages.append({"role": "user", "content": user_text})
             messages.append({"role": "assistant", "content": reminder_reply})
@@ -687,48 +774,14 @@ def _run_agent_turn(
         and _is_test_request(user_text)
         and not confirmed_execution
     ):
-        # ONE combined step: plan skills/tools/flow, precheck capability, and turn
-        # the flow into a concrete runnable test script (tool calls with proper
-        # parameters).
-        _emit(
-            step_callback,
-            print_tool_logs,
-            "[Planning] Analyzing your request and building the test plan — "
-            "picking the right tools and skills… this can take a moment.",
-        )
-        selected_tools, selected_names, selected_skills, flow, assessment = (
-            select_tools_for_task(user_text)
-        )
-        _emit(
-            step_callback,
-            print_tool_logs,
-            "[Planning] Gathering device info and generating the concrete test "
-            "script with proper parameters…",
-        )
-        script_obj, script_path = generate_test_script(
-            user_text, selected_tools, flow, selected_skills
-        )
-        _emit(step_callback, print_tool_logs, "[Planning] Finalizing the test plan…")
-        rounds = _parse_rounds(user_text)
-        plan_block = format_plan_for_reply(
-            script_obj, script_path, selected_skills, flow, assessment, rounds
-        )
-
-        # Always show the schedule + script and ask for confirmation before running.
-        PENDING_TEST_CONFIRMATIONS[session_key] = user_text
-        PENDING_TEST_SCRIPTS[session_key] = {
-            "script": script_obj,
-            "path": script_path,
-            "skills": selected_skills,
-        }
-        confirmation_prompt = (
-            "\n\n---\n"
-            "**Ready to start?** Please reply **yes** to begin or **no** to cancel."
-        )
-        reply = plan_block + confirmation_prompt
         messages.append({"role": "user", "content": user_text})
-        messages.append({"role": "assistant", "content": reply})
-        return reply
+        return _plan_and_confirm(
+            messages,
+            user_text,
+            session_key,
+            step_callback=step_callback,
+            print_tool_logs=print_tool_logs,
+        )
 
     # Normal chat / confirmed-fallback execution -> tool-using agent loop.
     messages.append({"role": "user", "content": user_text})
