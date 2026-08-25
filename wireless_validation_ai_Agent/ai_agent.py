@@ -77,7 +77,7 @@ from ai_task_planner import (
 )
 from ai_agent_backend import make_script_context_gatherer, DEFAULT_SCRIPT_CONTEXT_TOOLS
 from ai_task_runner import run_test_script
-from ai_flow_model import build_flow_model, flow_event
+from ai_flow_model import build_flow_model, flow_event, flow_clear_event
 
 # When frozen by PyInstaller, bundled data files live in sys._MEIPASS.
 # The exe itself is in os.path.dirname(sys.executable).
@@ -205,6 +205,14 @@ def _get_tool_description(tool) -> str:
 
 
 def _get_tool_params(tool) -> dict:
+    return tool.get("input_schema", {"type": "object", "properties": {}})
+
+
+def get_tool_param_schema(name: str) -> dict:
+    """Return a tool's JSON parameter schema by name (for the flow-panel editor)."""
+    tool = ALL_TOOLS_BY_NAME.get(name)
+    if not tool:
+        return {"type": "object", "properties": {}}
     return tool.get("input_schema", {"type": "object", "properties": {}})
 
 
@@ -602,7 +610,7 @@ def _plan_and_confirm(
     # Publish the flow-chart model so the Web UI panel can render the plan.
     if step_callback and script_obj:
         try:
-            model = build_flow_model(script_obj, rounds)
+            model = build_flow_model(script_obj, rounds, editable=True)
             if model:
                 step_callback(flow_event(model))
         except Exception:
@@ -724,6 +732,12 @@ def _run_agent_turn(
 
             # Case 2: plain "no" — cancel.
             cancel_reply = "Test execution cancelled. Let me know if you'd like to try something else."
+            # Clear the flow-chart panel — the planned test was cancelled.
+            if step_callback:
+                try:
+                    step_callback(flow_clear_event())
+                except Exception:
+                    pass
             messages.append({"role": "user", "content": user_text})
             messages.append({"role": "assistant", "content": cancel_reply})
             return cancel_reply

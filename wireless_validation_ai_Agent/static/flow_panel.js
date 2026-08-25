@@ -12,6 +12,11 @@
     var model = null;
     var nodeEls = {};       // id -> node element
     var nodeSummary = {};   // id -> short label for the "current" readout
+    var nodeData = {};      // id -> {function, type, arguments, condition}
+    var editable = false;   // nodes editable only while a plan is pending
+    var schemaCache = {};   // function name -> parameter JSON schema
+    var editorEl = null;    // parameter-editor popover
+    var bannerEl = null;
     var persisted = loadState();
 
     function loadState() {
@@ -51,6 +56,9 @@
                 '<span class="flow-round-badge" id="flow-round" style="display:none">Round 1/1</span>' +
                 '<span class="flow-current" id="flow-current"></span>' +
             '</div>' +
+            '<div class="flow-edit-banner" id="flow-edit-banner" style="display:none">' +
+                '\u270E Click any node to edit its parameters before running.' +
+            '</div>' +
             '<div class="flow-canvas" id="flow-canvas">' +
                 '<div class="flow-empty">No test flow yet.<br>Ask for a test plan and the flow chart will appear here.</div>' +
             '</div>';
@@ -61,10 +69,23 @@
         roundBadge = document.getElementById("flow-round");
         currentEl = document.getElementById("flow-current");
         resizeEl = document.getElementById("flow-resize");
+        bannerEl = document.getElementById("flow-edit-banner");
 
         document.getElementById("flow-close").addEventListener("click", close);
         document.getElementById("flow-popout").addEventListener("click", togglePopout);
         document.getElementById("flow-dock").addEventListener("click", toggleDock);
+
+        // Parameter-editor popover (shared, positioned near the clicked node).
+        editorEl = document.createElement("div");
+        editorEl.id = "flow-editor";
+        editorEl.className = "flow-hidden";
+        document.body.appendChild(editorEl);
+        document.addEventListener("mousedown", function (e) {
+            if (editorEl.classList.contains("flow-hidden")) return;
+            if (editorEl.contains(e.target)) return;
+            if (e.target.closest && e.target.closest(".flow-node")) return;
+            closeEditor();
+        });
 
         restoreGeometry();
         initResize();
@@ -210,6 +231,22 @@
     }
 
     // ── Rendering ──
+    function registerNode(el, node) {
+        nodeEls[node.id] = el;
+        nodeSummary[node.id] = node.type === "condition" ? ("IF " + node.function) : node.function;
+        nodeData[node.id] = {
+            "function": node.function,
+            type: node.type,
+            arguments: node.arguments || {},
+            condition: node.condition || "",
+        };
+        el.addEventListener("click", function (e) {
+            if (!editable) return;
+            e.stopPropagation();
+            openEditor(node.id, el);
+        });
+    }
+
     function renderNodes(nodes, container) {
         (nodes || []).forEach(function (node, idx) {
             if (idx > 0) {
@@ -218,8 +255,8 @@
                 conn.textContent = "\u2193";
                 container.appendChild(conn);
             }
-            var wrap = document.createElement("div");
             var num = node.id.split("-").pop();
+            var hint = '<span class="flow-edit-hint">\u270E edit</span>';
             if (node.type === "condition") {
                 var el = document.createElement("div");
                 el.className = "flow-node flow-condition";
@@ -228,10 +265,9 @@
                     '<div class="flow-node-index">' + esc(num) + "</div>" +
                     '<div class="flow-node-state"></div>' +
                     '<div class="flow-cond-label">IF &middot; ' + esc(node.condition || "") + "</div>" +
-                    '<div class="flow-node-fn">' + esc(node.function) + "</div>";
+                    '<div class="flow-node-fn">' + esc(node.function) + "</div>" + hint;
                 container.appendChild(el);
-                nodeEls[node.id] = el;
-                nodeSummary[node.id] = "IF " + node.function;
+                registerNode(el, node);
 
                 var branches = document.createElement("div");
                 branches.className = "flow-branches";
@@ -246,10 +282,9 @@
                     '<div class="flow-node-index">' + esc(num) + "</div>" +
                     '<div class="flow-node-state"></div>' +
                     '<div class="flow-node-fn">' + esc(node.function) + "</div>" +
-                    (node.summary ? '<div class="flow-node-args">' + esc(node.summary) + "</div>" : "");
+                    (node.summary ? '<div class="flow-node-args">' + esc(node.summary) + "</div>" : "") + hint;
                 container.appendChild(a);
-                nodeEls[node.id] = a;
-                nodeSummary[node.id] = node.function;
+                registerNode(a, node);
             }
         });
     }
@@ -276,6 +311,8 @@
         model = newModel;
         nodeEls = {};
         nodeSummary = {};
+        nodeData = {};
+        closeEditor();
         canvasEl.innerHTML = "";
         titleEl.textContent = model.task ? ("Flow: " + model.task) : "Test Flow";
 
@@ -299,12 +336,33 @@
         }
         currentEl.textContent = "";
         document.getElementById("flow-toggle-badge").style.display = "";
+
+        editable = !!model.editable;
+        panel.classList.toggle("flow-editable", editable);
+        if (bannerEl) bannerEl.style.display = editable ? "" : "none";
         open();
     }
 
+    // Reset the panel to its empty state (e.g. when a planned test is cancelled).
+    function clearChart() {
+        model = null;
+        nodeEls = {};
+        nodeSummary = {};
+        nodeData = {};
+        editable = false;
+        closeEditor();
+        panel.classList.remove("flow-editable");
+        if (bannerEl) bannerEl.style.display = "none";
+        canvasEl.innerHTML =
+            '<div class="flow-empty">No test flow yet.<br>Ask for a test plan and the flow chart will appear here.</div>';
+        titleEl.textContent = "Test Flow";
+        roundBadge.style.display = "none";
+        currentEl.textContent = "";
+        document.getElementById("flow-toggle-badge").style.display = "none";
+    }
+
     // ── Live highlight ──
-    function updateNode(id, status, ok) {
-        var el = nodeEls[id];
+    function updateNode(id, status, ok) {        var el = nodeEls[id];
         if (!el) return;
         var stateEl = el.querySelector(".flow-node-state");
         if (status === "running") {
@@ -336,9 +394,173 @@
         });
     }
 
+    // ── Node parameter editor ──
+    function closeEditor() {
+        if (editorEl) editorEl.classList.add("flow-hidden");
+    }
+
+    function fetchSchema(fn, cb) {
+        if (schemaCache[fn]) { cb(schemaCache[fn]); return; }
+        fetch("/tool_schema/" + encodeURIComponent(fn))
+            .then(function (r) { return r.json(); })
+            .then(function (j) { schemaCache[fn] = (j && j.schema) || {}; cb(schemaCache[fn]); })
+            .catch(function () { cb({}); });
+    }
+
+    function openEditor(nodeId, anchorEl) {
+        var d = nodeData[nodeId];
+        if (!d) return;
+        fetchSchema(d.function, function (schema) {
+            buildEditor(nodeId, d, schema);
+            positionEditor(anchorEl);
+            editorEl.classList.remove("flow-hidden");
+        });
+    }
+
+    function makeFieldWrapper(label, type, isReq) {
+        var w = document.createElement("div");
+        w.className = "flow-editor-field";
+        var l = document.createElement("label");
+        l.innerHTML = esc(label) +
+            (isReq ? '<span class="flow-req">*</span>' : "") +
+            (type ? '<span class="flow-type">' + esc(type) + "</span>" : "");
+        w.appendChild(l);
+        return w;
+    }
+
+    function buildEditor(nodeId, d, schema) {
+        editorEl.innerHTML = "";
+        var props = (schema && schema.properties) || {};
+        var required = (schema && schema.required) || [];
+
+        var head = document.createElement("div");
+        head.className = "flow-editor-head";
+        var title = document.createElement("div");
+        title.className = "flow-editor-title";
+        title.textContent = (d.type === "condition" ? "IF " : "") + d.function;
+        var closeB = document.createElement("button");
+        closeB.className = "flow-btn";
+        closeB.textContent = "\u2715";
+        closeB.addEventListener("click", closeEditor);
+        head.appendChild(title);
+        head.appendChild(closeB);
+        editorEl.appendChild(head);
+
+        editorEl._conditionInput = null;
+        if (d.type === "condition") {
+            var cf = makeFieldWrapper("condition", "expression", false);
+            var ci = document.createElement("input");
+            ci.type = "text";
+            ci.value = d.condition || "";
+            cf.appendChild(ci);
+            editorEl.appendChild(cf);
+            editorEl._conditionInput = ci;
+        }
+
+        var fields = [];
+        var keys = Object.keys(d.arguments || {});
+        if (keys.length === 0 && d.type !== "condition") {
+            var em = document.createElement("div");
+            em.className = "flow-editor-empty";
+            em.textContent = "This step has no parameters to edit.";
+            editorEl.appendChild(em);
+        }
+        keys.forEach(function (key) {
+            var spec = props[key] || {};
+            var t = spec.type;
+            var isReq = required.indexOf(key) >= 0;
+            var wrap = makeFieldWrapper(key, t, isReq);
+            var val = d.arguments[key];
+            var input, kind;
+            if (spec.enum && spec.enum.length) {
+                input = document.createElement("select"); kind = "select";
+                spec.enum.forEach(function (opt) {
+                    var o = document.createElement("option");
+                    o.value = String(opt); o.textContent = String(opt);
+                    if (String(opt) === String(val)) o.selected = true;
+                    input.appendChild(o);
+                });
+            } else if (t === "boolean") {
+                input = document.createElement("input"); input.type = "checkbox"; kind = "boolean";
+                input.checked = (val === true || String(val).toLowerCase() === "true");
+                wrap.classList.add("flow-editor-check");
+            } else if (t === "integer" || t === "number") {
+                input = document.createElement("input"); input.type = "number"; kind = "number";
+                if (t === "number") input.step = "any";
+                input.value = (val == null ? "" : val);
+            } else if (t === "array" || t === "object") {
+                input = document.createElement("textarea"); kind = "json";
+                try { input.value = JSON.stringify(val == null ? (t === "array" ? [] : {}) : val); }
+                catch (e) { input.value = String(val); }
+            } else {
+                input = document.createElement("input"); input.type = "text"; kind = "text";
+                input.value = (val == null ? "" : String(val));
+            }
+            wrap.appendChild(input);
+            editorEl.appendChild(wrap);
+            fields.push({ key: key, kind: kind, input: input });
+        });
+
+        var err = document.createElement("div");
+        err.className = "flow-editor-error";
+        editorEl.appendChild(err);
+
+        var actions = document.createElement("div");
+        actions.className = "flow-editor-actions";
+        var cancel = document.createElement("button");
+        cancel.textContent = "Cancel";
+        cancel.addEventListener("click", closeEditor);
+        var save = document.createElement("button");
+        save.className = "flow-save";
+        save.textContent = "Save";
+        save.addEventListener("click", function () { saveEdit(nodeId, d, fields, err, save); });
+        actions.appendChild(cancel);
+        actions.appendChild(save);
+        editorEl.appendChild(actions);
+    }
+
+    function saveEdit(nodeId, d, fields, errEl, saveBtn) {
+        var args = {};
+        fields.forEach(function (f) {
+            args[f.key] = (f.kind === "boolean") ? f.input.checked : f.input.value;
+        });
+        var body = { node_id: nodeId, arguments: args, rounds: (model && model.rounds) || 1 };
+        if (d.type === "condition" && editorEl._conditionInput) {
+            body.condition = editorEl._conditionInput.value;
+        }
+        errEl.textContent = "";
+        saveBtn.disabled = true;
+        fetch("/update_script_step", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+            .then(function (res) {
+                saveBtn.disabled = false;
+                if (!res.ok) { errEl.textContent = (res.j && res.j.error) || "Could not save."; return; }
+                closeEditor();
+                if (res.j && res.j.flowchart) render(res.j.flowchart);
+            })
+            .catch(function () { saveBtn.disabled = false; errEl.textContent = "Network error saving changes."; });
+    }
+
+    function positionEditor(anchorEl) {
+        var r = anchorEl.getBoundingClientRect();
+        var w = 340, h = Math.min(window.innerHeight * 0.74, 380);
+        var left = r.left - w - 12;
+        if (left < 8) left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right + 12));
+        var top = Math.min(window.innerHeight - h - 8, Math.max(8, r.top));
+        editorEl.style.left = left + "px";
+        editorEl.style.top = top + "px";
+    }
+
     // ── Public event entry point (called from the chat poll loop) ──
-    function handleEventLine(text) {
-        if (typeof text !== "string") return false;
+    function handleEventLine(text) {        if (typeof text !== "string") return false;
+        if (text.indexOf("[FlowClear]") === 0) {
+            clearChart();
+            return true;
+        }
         if (text.indexOf("[Flow]") === 0) {
             try { render(JSON.parse(text.slice(6))); } catch (e) {}
             return true;
@@ -356,7 +578,8 @@
 
     function isFlowEvent(text) {
         return typeof text === "string" &&
-            (text.indexOf("[Flow]") === 0 || text.indexOf("[Node]") === 0 || text.indexOf("[Round]") === 0);
+            (text.indexOf("[Flow]") === 0 || text.indexOf("[Node]") === 0 ||
+             text.indexOf("[Round]") === 0 || text.indexOf("[FlowClear]") === 0);
     }
 
     window.FlowPanel = {

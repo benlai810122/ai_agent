@@ -1,8 +1,12 @@
 import sys
 from flask import Flask, render_template, request, jsonify
-from ai_agent import _run_agent_turn, base_url, ALL_TOOL_FUNCTIONS, _generate_ai_report, SCRIPT_DIR
+from ai_agent import (
+    _run_agent_turn, base_url, ALL_TOOL_FUNCTIONS, _generate_ai_report, SCRIPT_DIR,
+    PENDING_TEST_SCRIPTS, get_tool_param_schema,
+)
 from ai_task_runner import run_test_script
 from ai_task_state_manager import has_runner_state, load_runner_state
+from ai_flow_model import build_flow_model, resolve_node, coerce_and_validate
 import threading
 import uuid
 import os
@@ -80,7 +84,7 @@ def _append_history_item(item: dict) -> None:
 # Structured flow-panel events reuse the progress transport but must not be
 # persisted into the run history (the [Flow] payload is large and none of these
 # are human-readable log lines).
-_FLOW_EVENT_PREFIXES = ("[Flow]", "[Node]", "[Round]")
+_FLOW_EVENT_PREFIXES = ("[Flow]", "[Node]", "[Round]", "[FlowClear]")
 
 
 def _strip_flow_events(progress: list) -> list:
@@ -225,6 +229,65 @@ def chat_status(request_id: str):
 @app.route('/chat_history', methods=['GET'])
 def chat_history():
     return jsonify({"history": _read_history()})
+
+
+@app.route('/tool_schema/<name>', methods=['GET'])
+def tool_schema(name: str):
+    """Return a tool's JSON parameter schema so the flow panel can build an edit form."""
+    return jsonify({"name": name, "schema": get_tool_param_schema(name)})
+
+
+@app.route('/update_script_step', methods=['POST'])
+def update_script_step():
+    """Patch one node's arguments (and a condition node's condition) in the pending script.
+
+    Editing is only allowed while a plan awaits confirmation; once the user runs it
+    (or cancels), there is no pending script and this returns 409.
+    """
+    payload = request.get_json(silent=True) or {}
+    node_id = payload.get("node_id")
+    new_args = payload.get("arguments")
+    condition = payload.get("condition")
+    try:
+        rounds = int(payload.get("rounds", 1) or 1)
+    except (TypeError, ValueError):
+        rounds = 1
+
+    if not node_id or not isinstance(new_args, dict):
+        return jsonify({"error": "node_id and arguments are required."}), 400
+
+    session_key = id(messages)
+    plan = PENDING_TEST_SCRIPTS.get(session_key)
+    if not plan:
+        return jsonify({"error": "No pending test plan to edit (it is already running or was cleared)."}), 409
+
+    script = plan.get("script") or {}
+    node, kind = resolve_node(script, node_id)
+    if not node:
+        return jsonify({"error": f"Step '{node_id}' was not found in the current script."}), 404
+
+    target = node["if"] if kind == "condition" else node
+    fn = str(target.get("function", ""))
+    schema = get_tool_param_schema(fn)
+    ok, coerced, errors = coerce_and_validate(schema, new_args)
+    if not ok:
+        return jsonify({"error": "; ".join(errors)}), 400
+
+    target["arguments"] = coerced
+    if kind == "condition" and isinstance(condition, str) and condition.strip():
+        target["condition"] = condition.strip()
+
+    # Keep the saved script .json in sync with the in-memory edit.
+    path = plan.get("path")
+    if path:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(script, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    model = build_flow_model(script, rounds, editable=True)
+    return jsonify({"status": "ok", "flowchart": model})
 
 
 @app.route('/active_request', methods=['GET'])
