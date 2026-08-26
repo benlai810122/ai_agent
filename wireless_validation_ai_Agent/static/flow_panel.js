@@ -507,6 +507,10 @@
 
         var actions = document.createElement("div");
         actions.className = "flow-editor-actions";
+        var remove = document.createElement("button");
+        remove.className = "flow-remove";
+        remove.textContent = "\u{1F5D1} Remove";
+        remove.addEventListener("click", function () { removeStep(nodeId, err, remove); });
         var cancel = document.createElement("button");
         cancel.textContent = "Cancel";
         cancel.addEventListener("click", closeEditor);
@@ -514,9 +518,29 @@
         save.className = "flow-save";
         save.textContent = "Save";
         save.addEventListener("click", function () { saveEdit(nodeId, d, fields, err, save); });
+        actions.appendChild(remove);
         actions.appendChild(cancel);
         actions.appendChild(save);
         editorEl.appendChild(actions);
+    }
+
+    function removeStep(nodeId, errEl, removeBtn) {
+        if (!window.confirm("Remove this step from the test?")) return;
+        errEl.textContent = "";
+        removeBtn.disabled = true;
+        fetch("/remove_script_step", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ node_id: nodeId, rounds: (model && model.rounds) || 1 }),
+        })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+            .then(function (res) {
+                removeBtn.disabled = false;
+                if (!res.ok) { errEl.textContent = (res.j && res.j.error) || "Could not remove."; return; }
+                closeEditor();
+                if (res.j && res.j.flowchart) render(res.j.flowchart);
+            })
+            .catch(function () { removeBtn.disabled = false; errEl.textContent = "Network error removing step."; });
     }
 
     function saveEdit(nodeId, d, fields, errEl, saveBtn) {

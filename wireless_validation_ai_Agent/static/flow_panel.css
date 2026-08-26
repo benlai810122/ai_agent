@@ -405,5 +405,14 @@ body.flow-docked #flow-panel {
     color: #001018;
     border: none;
 }
+.flow-editor-actions .flow-remove {
+    margin-right: auto;   /* push delete to the far left, Cancel/Save stay right */
+    border-color: rgba(255, 90, 106, 0.5);
+    color: var(--flow-fail);
+}
+.flow-editor-actions .flow-remove:hover {
+    background: rgba(255, 90, 106, 0.15);
+    border-color: var(--flow-fail);
+}
 .flow-editor-actions button:hover { filter: brightness(1.1); }
 .flow-editor-empty { color: var(--flow-muted); font-size: 12px; }

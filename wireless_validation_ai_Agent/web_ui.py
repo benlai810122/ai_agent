@@ -6,7 +6,7 @@ from ai_agent import (
 )
 from ai_task_runner import run_test_script
 from ai_task_state_manager import has_runner_state, load_runner_state
-from ai_flow_model import build_flow_model, resolve_node, coerce_and_validate
+from ai_flow_model import build_flow_model, resolve_node, coerce_and_validate, remove_node
 import threading
 import uuid
 import os
@@ -278,6 +278,40 @@ def update_script_step():
         target["condition"] = condition.strip()
 
     # Keep the saved script .json in sync with the in-memory edit.
+    path = plan.get("path")
+    if path:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(script, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    model = build_flow_model(script, rounds, editable=True)
+    return jsonify({"status": "ok", "flowchart": model})
+
+
+@app.route('/remove_script_step', methods=['POST'])
+def remove_script_step():
+    """Delete one node/step from the pending script. Only allowed while a plan is pending."""
+    payload = request.get_json(silent=True) or {}
+    node_id = payload.get("node_id")
+    try:
+        rounds = int(payload.get("rounds", 1) or 1)
+    except (TypeError, ValueError):
+        rounds = 1
+
+    if not node_id:
+        return jsonify({"error": "node_id is required."}), 400
+
+    session_key = id(messages)
+    plan = PENDING_TEST_SCRIPTS.get(session_key)
+    if not plan:
+        return jsonify({"error": "No pending test plan to edit (it is already running or was cleared)."}), 409
+
+    script = plan.get("script") or {}
+    if not remove_node(script, node_id):
+        return jsonify({"error": f"Step '{node_id}' could not be removed."}), 404
+
     path = plan.get("path")
     if path:
         try:

@@ -154,6 +154,51 @@ def resolve_node(script, node_id):
     return node, kind
 
 
+def remove_node(script, node_id) -> bool:
+    """Delete the step a flow node id points at (a condition node removes its branches too).
+
+    Returns True if a step was removed. Uses the same id scheme as ``resolve_node``.
+    """
+    if not isinstance(script, dict) or not node_id:
+        return False
+    tokens = str(node_id).split("-")
+    if len(tokens) < 2:
+        return False
+    phase = tokens[0]
+    lst = script.get(phase)
+    if not isinstance(lst, list):
+        return False
+    try:
+        idx = int(tokens[1])
+    except ValueError:
+        return False
+    if idx < 1 or idx > len(lst):
+        return False
+
+    parent_list, parent_index = lst, idx - 1
+    node = lst[idx - 1]
+    i = 2
+    while i < len(tokens):
+        if i + 1 >= len(tokens):
+            return False
+        branch, num_tok = tokens[i], tokens[i + 1]
+        if branch not in ("then", "else"):
+            return False
+        try:
+            j = int(num_tok)
+        except ValueError:
+            return False
+        blist = node.get(branch) if isinstance(node, dict) else None
+        if not isinstance(blist, list) or j < 1 or j > len(blist):
+            return False
+        parent_list, parent_index = blist, j - 1
+        node = blist[j - 1]
+        i += 2
+
+    del parent_list[parent_index]
+    return True
+
+
 def _coerce_value(value, json_type):
     """Coerce an incoming form value to the schema's JSON type (raises on bad input)."""
     if json_type == "integer":
