@@ -276,6 +276,9 @@ def update_script_step():
     target["arguments"] = coerced
     if kind == "condition" and isinstance(condition, str) and condition.strip():
         target["condition"] = condition.strip()
+    # WRT-debug flag lives on the step itself (not on a condition's 'if').
+    if "wrt_debug" in payload:
+        node["wrt_debug"] = bool(payload.get("wrt_debug"))
 
     # Keep the saved script .json in sync with the in-memory edit.
     path = plan.get("path")

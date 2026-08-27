@@ -239,6 +239,7 @@
             type: node.type,
             arguments: node.arguments || {},
             condition: node.condition || "",
+            wrt_debug: !!node.wrt_debug,
         };
         el.addEventListener("click", function (e) {
             if (!editable) return;
@@ -257,6 +258,9 @@
             }
             var num = node.id.split("-").pop();
             var hint = '<span class="flow-edit-hint">\u270E edit</span>';
+            var wrtBadge = node.wrt_debug
+                ? '<span class="flow-wrt-badge" title="Collect WRT logs if this step fails">WRT</span>'
+                : "";
             if (node.type === "condition") {
                 var el = document.createElement("div");
                 el.className = "flow-node flow-condition";
@@ -265,7 +269,7 @@
                     '<div class="flow-node-index">' + esc(num) + "</div>" +
                     '<div class="flow-node-state"></div>' +
                     '<div class="flow-cond-label">IF &middot; ' + esc(node.condition || "") + "</div>" +
-                    '<div class="flow-node-fn">' + esc(node.function) + "</div>" + hint;
+                    '<div class="flow-node-fn">' + esc(node.function) + wrtBadge + "</div>" + hint;
                 container.appendChild(el);
                 registerNode(el, node);
 
@@ -281,7 +285,7 @@
                 a.innerHTML =
                     '<div class="flow-node-index">' + esc(num) + "</div>" +
                     '<div class="flow-node-state"></div>' +
-                    '<div class="flow-node-fn">' + esc(node.function) + "</div>" +
+                    '<div class="flow-node-fn">' + esc(node.function) + wrtBadge + "</div>" +
                     (node.summary ? '<div class="flow-node-args">' + esc(node.summary) + "</div>" : "") + hint;
                 container.appendChild(a);
                 registerNode(a, node);
@@ -446,6 +450,21 @@
         head.appendChild(closeB);
         editorEl.appendChild(head);
 
+        // WRT Debug toggle: collect WRT logs into the report folder if this step fails.
+        var wd = document.createElement("div");
+        wd.className = "flow-editor-field flow-editor-check";
+        var wc = document.createElement("input");
+        wc.type = "checkbox";
+        wc.id = "flow-wrt-check";
+        wc.checked = !!d.wrt_debug;
+        var wl = document.createElement("label");
+        wl.setAttribute("for", "flow-wrt-check");
+        wl.textContent = "Run WRT Debug if this step fails";
+        wd.appendChild(wc);
+        wd.appendChild(wl);
+        editorEl.appendChild(wd);
+        editorEl._wrtInput = wc;
+
         editorEl._conditionInput = null;
         if (d.type === "condition") {
             var cf = makeFieldWrapper("condition", "expression", false);
@@ -551,6 +570,9 @@
         var body = { node_id: nodeId, arguments: args, rounds: (model && model.rounds) || 1 };
         if (d.type === "condition" && editorEl._conditionInput) {
             body.condition = editorEl._conditionInput.value;
+        }
+        if (editorEl._wrtInput) {
+            body.wrt_debug = editorEl._wrtInput.checked;
         }
         errEl.textContent = "";
         saveBtn.disabled = true;

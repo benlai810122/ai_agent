@@ -285,6 +285,21 @@ body.flow-docked #flow-panel {
     right: 8px;
     font-size: 12px;
 }
+
+/* WRT-debug badge shown on nodes that collect WRT logs on failure. */
+.flow-wrt-badge {
+    display: inline-block;
+    margin-left: 6px;
+    background: rgba(255, 160, 0, 0.18);
+    color: #ffb020;
+    border: 1px solid rgba(255, 160, 0, 0.5);
+    border-radius: 5px;
+    padding: 0 5px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    vertical-align: middle;
+}
 @keyframes flow-pulse {
     0%, 100% { box-shadow: 0 0 0 2px rgba(255, 207, 63, 0.3), 0 0 12px rgba(255, 207, 63, 0.25); }
     50% { box-shadow: 0 0 0 3px rgba(255, 207, 63, 0.6), 0 0 24px rgba(255, 207, 63, 0.5); }

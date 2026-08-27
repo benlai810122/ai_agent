@@ -485,6 +485,7 @@ def run_test_script(
                     report_folder_hint=planned_report_folder,
                     on_reboot=_on_reboot, start_index=s_start, prior_results=s_prior,
                     node_base="setup",
+                    project_root=base_dir,
                 )
                 report_folder = report_folder or folder
 
@@ -514,6 +515,7 @@ def run_test_script(
                     round_path_map=round_map,
                     on_reboot=_on_reboot, start_index=r_start, prior_results=r_prior,
                     node_base="steps",
+                    project_root=base_dir,
                 )
                 report_folder = report_folder or folder
                 round_overall = "PASS" if all(x["ok"] for x in results) else "FAIL"
@@ -534,6 +536,7 @@ def run_test_script(
                 report_folder_hint=report_folder or planned_report_folder,
                 on_reboot=_on_reboot, start_index=t_start, prior_results=t_prior,
                 node_base="teardown",
+                project_root=base_dir,
             )
             report_folder = report_folder or folder
     except _RebootIssued:
@@ -670,6 +673,7 @@ def _execute_steps(
     start_index=0,
     prior_results=None,
     node_base=None,
+    project_root=None,
 ):
     """Run every step once with the given log prefix. Returns (results, report_folder).
 
@@ -681,6 +685,9 @@ def _execute_steps(
     ``node_base`` (e.g. "setup"/"steps"/"teardown") enables live ``[Node]`` events
     for the Web UI flow panel; node ids follow ``{node_base}-{i}`` and branch
     children ``{node_base}-{i}-then/-else-{j}`` (see ai_flow_model).
+
+    A step flagged ``wrt_debug`` runs the ``wrt_log_debug`` tool (dump/copy/clear
+    WRT logs into ``<report_folder>/wrt_debug``) when that step fails, then continues.
     """
     results = list(prior_results) if prior_results else []
     report_folder = None
@@ -691,6 +698,27 @@ def _execute_steps(
             _emit(step_callback, False, node_event(
                 node_base, index, status, ok=ok, round_number=round_number,
             ))
+
+    def _maybe_wrt_debug(step, index, failed):
+        """Run wrt_log_debug into the report folder when a flagged step failed."""
+        if not failed or not (isinstance(step, dict) and step.get("wrt_debug")):
+            return None
+        wrt_fn = tool_functions.get("wrt_log_debug")
+        if wrt_fn is None:
+            _emit(step_callback, print_logs,
+                  f"{prefix}Step {index}: WRT Debug requested but wrt_log_debug is unavailable.")
+            return {"status": "error", "error": "wrt_log_debug tool unavailable"}
+        base = report_folder or report_folder_hint or os.getcwd()
+        wrt_dir = os.path.join(base, "wrt_debug")
+        log_path = os.path.relpath(wrt_dir, project_root) if project_root else wrt_dir
+        _emit(step_callback, print_logs,
+              f"{prefix}Step {index} failed \u2014 running WRT Debug (logs -> {wrt_dir})\u2026")
+        try:
+            res = wrt_fn(log_path=log_path)
+        except Exception as e:  # noqa: BLE001 - WRT collection must not abort the run
+            res = {"status": "error", "error": str(e)}
+        _emit(step_callback, print_logs, f"{prefix}Step {index} WRT Debug: {_short(res)}")
+        return res
 
     for i, step in enumerate(steps, 1):
         if i <= start_index:
@@ -764,6 +792,7 @@ def _execute_steps(
                 round_path_map=round_path_map,
                 on_reboot=None,     # reboot must be a top-level step (see below)
                 node_base=f"{node_base}-{i}-{branch_label.lower()}" if node_base else None,
+                project_root=project_root,
             )
             results.extend(branch_results)
             report_folder = report_folder or branch_folder
@@ -781,6 +810,9 @@ def _execute_steps(
                 "condition": condition_str,
             })
             _node(i, "done", ok=not _has_hard_error(if_result))
+            wrt = _maybe_wrt_debug(step, i, _has_hard_error(if_result))
+            if wrt is not None:
+                results[-1]["wrt_debug"] = wrt
             if on_done:
                 on_done()
             continue
@@ -899,6 +931,9 @@ def _execute_steps(
                 "ok": not errored,
             }
         )
+        wrt = _maybe_wrt_debug(step, i, errored)
+        if wrt is not None:
+            results[-1]["wrt_debug"] = wrt
         if on_done:
             on_done()
 

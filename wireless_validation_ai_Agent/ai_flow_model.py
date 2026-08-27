@@ -43,6 +43,7 @@ def _build_nodes(steps, base: str) -> list:
                 "arguments": if_spec.get("arguments") or {},
                 "summary": f"{fn}({_summarize_args(if_spec.get('arguments'))})",
                 "condition": cond,
+                "wrt_debug": bool(step.get("wrt_debug")),
                 "then": _build_nodes(step.get("then") or [], f"{nid}-then"),
                 "else": _build_nodes(step.get("else") or [], f"{nid}-else"),
             })
@@ -54,6 +55,7 @@ def _build_nodes(steps, base: str) -> list:
                 "function": fn,
                 "arguments": step.get("arguments") or {},
                 "summary": f"{fn}({_summarize_args(step.get('arguments'))})",
+                "wrt_debug": bool(step.get("wrt_debug")),
             })
     return nodes
 

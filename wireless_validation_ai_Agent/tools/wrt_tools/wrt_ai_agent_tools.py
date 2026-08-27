@@ -151,10 +151,15 @@ def copy_wrt_log_to_file(start_time, log_path: str = "") -> dict:
 
         copied = []
         skipped = 0
+        already_exists = []
         for src_dir in all_dirs:
             create_time = os.path.getmtime(src_dir)
             if create_time >= start_epoch:
                 target_path = os.path.join(PROJECT_ROOT, log_path, os.path.basename(src_dir))
+                # Skip an already-copied folder instead of failing the whole copy.
+                if os.path.exists(target_path):
+                    already_exists.append(target_path)
+                    continue
                 shutil.copytree(src_dir, target_path)
                 copied.append(target_path)
             else:
@@ -165,7 +170,9 @@ def copy_wrt_log_to_file(start_time, log_path: str = "") -> dict:
             "start_time_epoch": start_epoch,
             "copied_count": len(copied),
             "skipped_count": skipped,
+            "already_exists_count": len(already_exists),
             "copied_folders": copied,
+            "already_exists_folders": already_exists,
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -257,6 +264,71 @@ def wrt_error_code_filter(log_path: str, white_list: list = None) -> dict:
         return {"status": "error", "error": str(e)}
 
 
+def wrt_log_debug(log_path: str, wait_seconds: int = 60) -> dict:
+    """Run the full WRT log-collection cycle in one call.
+
+    Steps, in order:
+      1. dump_wrt_log        — trigger 'cde.exe dump_collect'.
+      2. copy_wrt_log_to_file — copy ALL WRT log folders into log_path.
+      3. clear_all_log       — wipe the WRT logs afterward.
+
+    Args:
+        log_path: Destination path (relative to the project root) for the copied logs.
+        wait_seconds: Seconds to wait for the dump to complete (default 60).
+
+    Returns:
+        dict with an overall status plus each step's result under 'steps'. The
+        overall status is 'success' only when all three steps succeed; otherwise it
+        stops at the first failing step and reports 'failed_step'.
+    """
+    try:
+        steps = {}
+
+        dump_res = dump_wrt_log(wait_seconds)
+        steps["dump"] = dump_res
+        if dump_res.get("status") != "success":
+            return {
+                "status": "error",
+                "failed_step": "dump",
+                "error": dump_res.get("error") or dump_res.get("stderr") or "dump_wrt_log failed.",
+                "steps": steps,
+            }
+
+        # start_time=1 (epoch) captures every log folder, so ALL logs are copied.
+        copy_res = copy_wrt_log_to_file(1, log_path)
+        steps["copy"] = copy_res
+        if copy_res.get("status") != "success":
+            return {
+                "status": "error",
+                "failed_step": "copy",
+                "error": copy_res.get("error") or "copy_wrt_log_to_file failed.",
+                "steps": steps,
+            }
+
+        clear_res = clear_all_log()
+        steps["clear"] = clear_res
+        if clear_res.get("status") != "success":
+            return {
+                "status": "error",
+                "failed_step": "clear",
+                "error": clear_res.get("error") or clear_res.get("stderr") or "clear_all_log failed.",
+                "steps": steps,
+            }
+
+        return {
+            "status": "success",
+            "message": (
+                f"Dumped, copied {copy_res.get('copied_count', 0)} WRT log folder(s) to "
+                f"'{log_path}', and cleared all WRT logs."
+            ),
+            "copied_count": copy_res.get("copied_count", 0),
+            "copied_folders": copy_res.get("copied_folders", []),
+            "steps": steps,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 WRT_ANTHROPIC_TOOLS = [
     {
         "name": "check_wrt_installed",
@@ -327,6 +399,24 @@ WRT_ANTHROPIC_TOOLS = [
             "required": ["log_path"],
         },
     },
+    {
+        "name": "wrt_log_debug",
+        "description": "One-shot WRT log debug helper: dump WRT logs (cde.exe dump_collect), copy ALL WRT log folders into a destination path (relative to the project root), then clear all WRT logs (cde.exe clear_all). Returns an overall status plus each step's result; stops at the first failing step.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "log_path": {
+                    "type": "string",
+                    "description": "Destination path (relative to the project root) to copy all WRT logs into."
+                },
+                "wait_seconds": {
+                    "type": "integer",
+                    "description": "Seconds to wait for the dump to complete. Defaults to 60."
+                }
+            },
+            "required": ["log_path"],
+        },
+    },
 ]
 
 WRT_TOOL_FUNCTIONS = {
@@ -335,4 +425,5 @@ WRT_TOOL_FUNCTIONS = {
     "copy_wrt_log_to_file": copy_wrt_log_to_file,
     "clear_all_log": clear_all_log,
     "wrt_error_code_filter": wrt_error_code_filter,
+    "wrt_log_debug": wrt_log_debug,
 }
