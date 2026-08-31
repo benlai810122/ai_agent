@@ -7,7 +7,7 @@ import threading
 import re
 from typing import Callable
 from datetime import datetime
-import httpx
+import httpx2
 from tools.regular_tools.regular_ai_agent_tools import (
     ANTHROPIC_TOOLS,
     TOOL_FUNCTIONS,
@@ -95,7 +95,7 @@ base_url = "https://gnai.intel.com/api/providers/anthropic"
 auth_token = config["gnai_token"]
 
 # Initialize the Anthropic client (skip SSL verify for Intel internal proxy)
-http_client = httpx.Client(verify=False)
+http_client = httpx2.Client(verify=False)
 client = Anthropic(base_url=base_url, auth_token=auth_token, http_client=http_client)
 
 # Merge all tools

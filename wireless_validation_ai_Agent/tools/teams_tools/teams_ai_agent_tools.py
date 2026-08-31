@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 
-import httpx
+import httpx2
 import yaml
 from anthropic import Anthropic
 
@@ -22,7 +22,7 @@ _CONFIG_PATH = os.path.join(_PROJECT_ROOT, "open_ai_key.yaml")
 with open(_CONFIG_PATH, "r", encoding="utf-8") as _config_file:
     _config = yaml.safe_load(_config_file)
 
-_HTTP_CLIENT = httpx.Client(verify=False)
+_HTTP_CLIENT = httpx2.Client(verify=False)
 _ANTHROPIC_CLIENT = Anthropic(
     base_url="https://gnai.intel.com/api/providers/anthropic",
     auth_token=_config["gnai_token"],
