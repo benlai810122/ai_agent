@@ -1,7 +1,34 @@
 import asyncio
+import base64
 import json
 import os
+import re
+import sys
 import time
+
+import httpx2
+import yaml
+from anthropic import Anthropic
+
+from tools.regular_tools.regular_ai_agent_tools import capture_screen
+
+if getattr(sys, 'frozen', False):
+    _PROJECT_ROOT = sys._MEIPASS
+else:
+    _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "open_ai_key.yaml")
+with open(_CONFIG_PATH, "r", encoding="utf-8") as _config_file:
+    _config = yaml.safe_load(_config_file)
+
+_HTTP_CLIENT = httpx2.Client(verify=False)
+_ANTHROPIC_CLIENT = Anthropic(
+    base_url="https://gnai.intel.com/api/providers/anthropic",
+    auth_token=_config["gnai_token"],
+    http_client=_HTTP_CLIENT,
+)
+
+_VISION_MODEL = "claude-4-5-sonnet"
 
 
 def scan_bluetooth_devices(duration: int = 5) -> dict:
@@ -786,6 +813,111 @@ if ($disconnectButton) {{
         return {"error": str(e)}
 
 
+def pas_function_check(file_path: str = "") -> dict:
+    """Check whether the laptop's PAS (shared audio) function is enabled: opens Windows Quick
+    Settings (Win+A), screenshots it, and asks the GNAI vision model whether a 'Shared audio'
+    option is visible/enabled in the panel.
+
+    file_path: where to save the screenshot. Defaults to a timestamped file under the
+    project's report/ folder if not given."""
+    try:
+        from datetime import datetime
+        import pyautogui
+
+        steps_log = []
+
+        if not file_path:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_path = os.path.join(_PROJECT_ROOT, "report", f"pas_check_{stamp}.png")
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+
+        # Step 1: Open Quick Settings
+        pyautogui.hotkey('win', 'a')
+        time.sleep(1)
+        steps_log.append("Opened Quick Settings (Win+A)")
+
+        # Step 2: Screenshot
+        shot = capture_screen(save_path=file_path)
+        if shot.get("status") != "success":
+            pyautogui.press('esc')
+            return {"status": "error", "message": shot.get("error", "Could not capture screen."), "steps": steps_log}
+
+        file_path = shot.get("file_path")
+        with open(file_path, "rb") as image_file:
+            image_b64 = base64.b64encode(image_file.read()).decode("utf-8")
+        steps_log.append(f"Captured screenshot: {file_path}")
+
+        # Step 3: Ask the vision model whether 'Shared audio' is present/enabled
+        response = _ANTHROPIC_CLIENT.messages.create(
+            model=_VISION_MODEL,
+            max_tokens=50,
+            system=(
+                "You are looking at a screenshot of the Windows 11 Quick Settings panel. "
+                "Reply with ONLY a JSON object, no other text: "
+                '{"enabled": true or false}. '
+                "Set enabled to true if a 'Shared audio' tile/option is visible in the panel, "
+                "false otherwise."
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Is 'Shared audio' present and enabled in this Quick Settings panel?"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_b64}},
+                    ],
+                }
+            ],
+        )
+
+        # Step 4: Dismiss the Quick Settings flyout
+        pyautogui.press('esc')
+
+        text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text").strip()
+        steps_log.append(f"GNAI response: '{text}'")
+
+        usage = getattr(response, "usage", None)
+        token_usage = {
+            "input_tokens": getattr(usage, "input_tokens", None),
+            "output_tokens": getattr(usage, "output_tokens", None),
+            "total_tokens": (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0),
+        }
+        steps_log.append(f"Token usage: {token_usage}")
+
+        pas_enabled = None
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if match:
+            try:
+                pas_enabled = bool(json.loads(match.group(0)).get("enabled"))
+            except Exception:
+                pas_enabled = None
+
+        if pas_enabled is None:
+            # Fall back to keyword scanning if the model didn't return valid JSON.
+            lowered = text.lower()
+            if "true" in lowered or ("shared audio" in lowered and "not" not in lowered):
+                pas_enabled = True
+            elif "false" in lowered:
+                pas_enabled = False
+
+        if pas_enabled is None:
+            return {
+                "status": "check_failed",
+                "message": f"GNAI did not return a clear true/false answer (got '{text}').",
+                "steps": steps_log,
+                "token_usage": token_usage,
+            }
+
+        return {
+            "status": "success",
+            "pas_enabled": pas_enabled,
+            "message": f"PAS (shared audio) is {'enabled' if pas_enabled else 'disabled'}.",
+            "steps": steps_log,
+            "token_usage": token_usage,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # Map of function name -> callable
 BLUETOOTH_TOOL_FUNCTIONS = {
     "scan_bluetooth_devices": scan_bluetooth_devices,
@@ -794,6 +926,7 @@ BLUETOOTH_TOOL_FUNCTIONS = {
     "reconnect_bluetooth_via_ui": reconnect_bluetooth_via_ui,
     "set_bluetooth_radio_via_ui": set_bluetooth_radio_via_ui,
     "disconnect_bluetooth_via_ui": disconnect_bluetooth_via_ui,
+    "pas_function_check": pas_function_check,
 }
 
 # Anthropic-compatible tool definitions
@@ -861,6 +994,17 @@ BLUETOOTH_ANTHROPIC_TOOLS = [
                 "device_name": {"type": "string", "description": "The name (or partial name) of the Bluetooth device to disconnect, e.g. 'Dell WL5024' or 'PLT Focus'."}
             },
             "required": ["device_name"],
+        },
+    },
+    {
+        "name": "pas_function_check",
+        "description": "Check whether the laptop's PAS (shared audio) Bluetooth function is enabled by reading the 'Shared audio' tile in the Windows Quick Settings flyout (Win+A). Read-only; does not require a device name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Where to save the Quick Settings screenshot. Defaults to a timestamped file under the project's report/ folder."}
+            },
+            "required": [],
         },
     },
 ]

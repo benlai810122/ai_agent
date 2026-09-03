@@ -10,6 +10,13 @@ item is {"function", "arguments"} or a conditional {"if", "then", "else"}.
 
 import json
 
+# Tool functions that call a vision/LLM model internally and therefore incur
+# extra token cost per run. Flagged in the flow model so the UI can badge them.
+AI_VISION_FUNCTIONS = {
+    "pas_function_check",
+    "join_teams_meeting",
+}
+
 
 def _summarize_args(args, limit: int = 70) -> str:
     """Render arguments as a short one-line ``k=v, ...`` summary."""
@@ -44,6 +51,7 @@ def _build_nodes(steps, base: str) -> list:
                 "summary": f"{fn}({_summarize_args(if_spec.get('arguments'))})",
                 "condition": cond,
                 "wrt_debug": bool(step.get("wrt_debug")),
+                "ai_cost": fn in AI_VISION_FUNCTIONS,
                 "then": _build_nodes(step.get("then") or [], f"{nid}-then"),
                 "else": _build_nodes(step.get("else") or [], f"{nid}-else"),
             })
@@ -56,6 +64,7 @@ def _build_nodes(steps, base: str) -> list:
                 "arguments": step.get("arguments") or {},
                 "summary": f"{fn}({_summarize_args(step.get('arguments'))})",
                 "wrt_debug": bool(step.get("wrt_debug")),
+                "ai_cost": fn in AI_VISION_FUNCTIONS,
             })
     return nodes
 

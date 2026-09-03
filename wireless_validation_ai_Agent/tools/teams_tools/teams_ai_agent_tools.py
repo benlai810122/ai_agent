@@ -164,8 +164,20 @@ def _find_join_button_via_vision() -> dict:
 
     text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
     parsed = _extract_json_object(text)
+
+    usage = getattr(response, "usage", None)
+    token_usage = {
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+        "total_tokens": (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0),
+    }
+
     if not parsed:
-        return {"status": "error", "error": f"Vision model did not return usable JSON: {text[:500]}"}
+        return {
+            "status": "error",
+            "error": f"Vision model did not return usable JSON: {text[:500]}",
+            "token_usage": token_usage,
+        }
 
     # Scale coordinates back to actual screen pixels
     if parsed.get("x") is not None:
@@ -176,7 +188,7 @@ def _find_join_button_via_vision() -> dict:
     parsed["original_resolution"] = f"{orig_w}x{orig_h}"
     parsed["scaled_resolution"] = f"{small_w}x{small_h}"
 
-    return {"status": "success", "result": parsed, "raw": text}
+    return {"status": "success", "result": parsed, "raw": text, "token_usage": token_usage}
 
 
 # ── Tool functions ────────────────────────────────────────────────────────────
@@ -314,6 +326,7 @@ def join_teams_meeting(meeting_url: str = "", meeting_title: str = "") -> dict:
             }
 
         parsed = vision_result.get("result", {})
+        token_usage = vision_result.get("token_usage")
         x = parsed.get("x")
         y = parsed.get("y")
         confidence = parsed.get("confidence", 0)
@@ -322,6 +335,7 @@ def join_teams_meeting(meeting_url: str = "", meeting_title: str = "") -> dict:
             return {
                 "status": "error",
                 "error": f"Vision could not locate Join Now button with sufficient confidence. Result: {parsed}",
+                "token_usage": token_usage,
             }
 
         click_info = _move_and_click(int(x), int(y))
@@ -334,6 +348,7 @@ def join_teams_meeting(meeting_url: str = "", meeting_title: str = "") -> dict:
             "vision": parsed,
             "click": click_info,
             "call_active": call_status.get("call_active", False),
+            "token_usage": token_usage,
             "message": (
                 "Successfully clicked the Join Now button. Call is now active."
                 if call_status.get("call_active")

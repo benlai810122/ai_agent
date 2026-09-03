@@ -240,6 +240,7 @@
             arguments: node.arguments || {},
             condition: node.condition || "",
             wrt_debug: !!node.wrt_debug,
+            ai_cost: !!node.ai_cost,
         };
         el.addEventListener("click", function (e) {
             if (!editable) return;
@@ -261,6 +262,9 @@
             var wrtBadge = node.wrt_debug
                 ? '<span class="flow-wrt-badge" title="Collect WRT logs if this step fails">WRT</span>'
                 : "";
+            var aiBadge = node.ai_cost
+                ? '<span class="flow-ai-badge" title="Calls an AI vision model \u2014 this step has extra token cost">\uD83E\uDD16 AI</span>'
+                : "";
             if (node.type === "condition") {
                 var el = document.createElement("div");
                 el.className = "flow-node flow-condition";
@@ -269,7 +273,7 @@
                     '<div class="flow-node-index">' + esc(num) + "</div>" +
                     '<div class="flow-node-state"></div>' +
                     '<div class="flow-cond-label">IF &middot; ' + esc(node.condition || "") + "</div>" +
-                    '<div class="flow-node-fn">' + esc(node.function) + wrtBadge + "</div>" + hint;
+                    '<div class="flow-node-fn">' + esc(node.function) + wrtBadge + aiBadge + "</div>" + hint;
                 container.appendChild(el);
                 registerNode(el, node);
 
@@ -285,7 +289,7 @@
                 a.innerHTML =
                     '<div class="flow-node-index">' + esc(num) + "</div>" +
                     '<div class="flow-node-state"></div>' +
-                    '<div class="flow-node-fn">' + esc(node.function) + wrtBadge + "</div>" +
+                    '<div class="flow-node-fn">' + esc(node.function) + wrtBadge + aiBadge + "</div>" +
                     (node.summary ? '<div class="flow-node-args">' + esc(node.summary) + "</div>" : "") + hint;
                 container.appendChild(a);
                 registerNode(a, node);
